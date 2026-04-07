@@ -1,0 +1,98 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              Int                 @id @default(autoincrement())
+  email           String              @unique
+  name            String
+  password        String
+  role            String              @default("collaborator")
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  permissions     String?
+  createdProducts ActivationProduct[] @relation("CreatedActivationProducts")
+  createdStories  Story[]             @relation("CreatedStories")
+}
+
+model Story {
+  id          String   @id @default(cuid())
+  title       String
+  url         String
+  type        String
+  productId   String?
+  createdById Int?
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+  createdBy   User?    @relation("CreatedStories", fields: [createdById], references: [id])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userCpf   String
+  title     String
+  message   String
+  type      String
+  imageUrl  String?
+  actionUrl String?
+  isRead    Boolean  @default(false)
+  readCount Int      @default(0)
+  createdAt DateTime @default(now())
+}
+
+model Setting {
+  key   String @id
+  value String
+}
+
+model ActivationProduct {
+  id                String              @id @default(cuid())
+  name              String
+  description       String
+  imageUrl          String?
+  originalPrice     Float
+  promotionalPrice  Float
+  limitPerCpf       Int                 @default(1)
+  redeemWindowHours Int                 @default(24)
+  expiresAt         DateTime
+  isMonthly         Boolean             @default(false)
+  isFree            Boolean             @default(false)
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  createdById       Int?
+  createdBy         User?               @relation("CreatedActivationProducts", fields: [createdById], references: [id])
+  activations       ProductActivation[]
+}
+
+model ProductActivation {
+  id          String            @id @default(cuid())
+  productId   String
+  userCpf     String
+  activatedAt DateTime          @default(now())
+  redeemedAt  DateTime?
+  validUntil  DateTime
+  product     ActivationProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model PamphletImage {
+  id        Int      @id @default(autoincrement())
+  url       String
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+}
+
+model PushToken {
+  id        String   @id @default(cuid())
+  userCpf   String
+  token     String   @unique
+  device    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userCpf])
+}

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "14766353520",
+    "project_id": "sanremobonus",
+    "storage_bucket": "sanremobonus.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:14766353520:android:f99621ca9d08481d3e98b5",
+        "android_client_info": {
+          "package_name": "br.com.sanremobonus.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA6ffyF0wk4Uf1-Gy9boT-ErJhX_6mQGTc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
