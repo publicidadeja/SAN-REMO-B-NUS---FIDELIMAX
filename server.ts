@@ -124,7 +124,7 @@ try {
 }
 
 // Helper to send Push Notifications via FCM
-async function sendPushNotification(title: string, body: string, userCpf?: string, data?: any) {
+async function sendPushNotification(title: string, body: string, userCpf?: string, data: Record<string, any> = {}) {
   if (admin.apps.length === 0) {
     console.log(`[Push MOCK] Title: ${title} | Body: ${body} | User: ${userCpf || 'ALL'}`);
     return;
@@ -138,62 +138,89 @@ async function sendPushNotification(title: string, body: string, userCpf?: strin
       return;
     }
 
+    // FCM 'data' values MUST be strings.
+    // We sanitize the data object here.
+    const sanitizedData: Record<string, string> = {};
+    for (const key in data) {
+      if (data[key] !== undefined && data[key] !== null) {
+        if (typeof data[key] === 'object') {
+          sanitizedData[key] = JSON.stringify(data[key]);
+        } else {
+          sanitizedData[key] = String(data[key]);
+        }
+      }
+    }
+
     if (userCpf && userCpf !== '__GLOBAL__') {
       // Send to specific user tokens
       for (const token of tokens) {
         const message = {
           notification: { title, body },
-          data: { ...data, cpf: userCpf },
+          data: { ...sanitizedData, cpf: userCpf },
           token: token,
-          sound: 'notification',
-          apns: {
-            payload: {
-              aps: {
-                sound: 'notification.mp3'
-              }
+          android: {
+            priority: 'high' as const,
+            notification: { 
+              sound: 'notification',
+              channelId: 'default' 
             }
           },
-          android: {
-            notification: {
-              sound: 'notification'
+          apns: {
+            payload: {
+              aps: { 
+                sound: 'notification.mp3',
+                badge: 1 
+              }
             }
           }
         };
-        await admin.messaging().send(message);
-        console.log(`[Push] Sent to ${userCpf}: ${title}`);
+
+        try {
+          await admin.messaging().send(message);
+          console.log(`[Push] Sent to ${userCpf}: ${title}`);
+        } catch (error: any) {
+          console.error(`[Push] Error sending to token ${token}:`, error.message);
+          if (error.code === 'messaging/registration-token-not-registered' || error.code === 'messaging/invalid-registration-token') {
+             // @ts-ignore
+             await prisma.pushToken.deleteMany({ where: { token } }).catch(() => {});
+          }
+        }
       }
     } else {
       // Global Push
-      // admin.messaging().sendEachForMulticast is the modern way
       const response = await admin.messaging().sendEachForMulticast({
         tokens,
         notification: { title, body },
-        data: { ...data, type: 'global_announcement' },
-        sound: 'notification',
-        apns: {
-          payload: {
-            aps: {
-              sound: 'notification.mp3'
-            }
+        data: { ...sanitizedData, type: 'global_announcement' },
+        android: {
+          priority: 'high' as const,
+          notification: { 
+            sound: 'notification',
+            channelId: 'default' 
           }
         },
-        android: {
-          notification: {
-            sound: 'notification'
+        apns: {
+          payload: {
+            aps: { 
+              sound: 'notification.mp3',
+              badge: 1 
+            }
           }
         }
       });
-      console.log(`[Push] Global broadcast to ${tokens.length} tokens. Success: ${response.successCount}, Failure: ${response.failureCount}`);
       
-      // Cleanup failed tokens (optional but good practice)
+      console.log(`[Push] Global broadcast to ${tokens.length} tokens. Success: ${response.successCount}, Failure: ${response.failureCount}`);
+
+      // Cleanup failed tokens
       if (response.failureCount > 0) {
         response.responses.forEach(async (resp, idx) => {
           if (!resp.success) {
             const errorCode = resp.error?.code;
             if (errorCode === 'messaging/registration-token-not-registered' || errorCode === 'messaging/invalid-registration-token') {
+              const failedToken = tokens[idx];
               // @ts-ignore
-              await prisma.pushToken.deleteMany({ where: { token: tokens[idx] } });
-              console.log(`[Push] Cleaned up invalid token: ${tokens[idx]}`);
+              await prisma.pushToken.deleteMany({ where: { token: failedToken } }).catch(() => {});
+              console.log(`[Push] Cleaned up invalid token: ${failedToken}`);
             }
           }
         });

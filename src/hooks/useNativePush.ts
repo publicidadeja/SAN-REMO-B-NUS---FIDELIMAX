@@ -5,12 +5,10 @@ import { useAppStore } from '../store/useAppStore';
 import { FidelimaxApiService } from '../api/fidelimax';
 
 export const useNativePush = () => {
-  const { user, token: authToken } = useAppStore();
+  const { user, token: authToken, fcmToken, setFcmToken } = useAppStore();
 
+  // 1. Initialize Listeners and Permissions immediately on mount if Native
   useEffect(() => {
-    // Only proceed if we have a logged-in consumer
-    if (!user || !authToken || user.role !== 'user') return;
-
     const initializePush = async () => {
       try {
         const info = await Device.getInfo();
@@ -21,9 +19,12 @@ export const useNativePush = () => {
           return;
         }
 
+        console.log('[NativePush] Initializing native push logic...');
+
         let permStatus = await PushNotifications.checkPermissions();
 
         if (permStatus.receive === 'prompt') {
+          console.log('[NativePush] Requesting permissions...');
           permStatus = await PushNotifications.requestPermissions();
         }
 
@@ -36,13 +37,9 @@ export const useNativePush = () => {
         await PushNotifications.register();
 
         // Listeners
-        PushNotifications.addListener('registration', async (token: Token) => {
-          console.log('[NativePush] Token registered:', token.value);
-          try {
-            await FidelimaxApiService.registerPushToken(user.cpf, token.value, `${info.model} (${info.platform})`);
-          } catch (err) {
-            console.error('[NativePush] Failed to register token with backend:', err);
-          }
+        PushNotifications.addListener('registration', (token: Token) => {
+          console.log('[NativePush] Token received:', token.value);
+          setFcmToken(token.value);
         });
 
         PushNotifications.addListener('registrationError', (error: any) => {
@@ -51,13 +48,10 @@ export const useNativePush = () => {
 
         PushNotifications.addListener('pushNotificationReceived', (notification) => {
           console.log('[NativePush] Notification received:', notification);
-          // Foreground notifications are usually shown automatically by the OS 
-          // or can be customized here.
         });
 
         PushNotifications.addListener('pushNotificationActionPerformed', (action: ActionPerformed) => {
           console.log('[NativePush] Action performed:', action);
-          // Redirect user based on notification data
           if (action.notification.data?.url) {
             window.location.href = action.notification.data.url;
           }
@@ -71,9 +65,24 @@ export const useNativePush = () => {
     initializePush();
 
     return () => {
-      PushNotifications.removeAllListeners().catch(() => {
-        // Silently ignore errors on web or if plugin not available
-      });
+      PushNotifications.removeAllListeners().catch(() => {});
     };
-  }, [user?.cpf, authToken]);
+  }, [setFcmToken]);
+
+  // 2. Register with Backend whenever User + Token + Auth are available
+  useEffect(() => {
+    if (!user || !authToken || !fcmToken) return;
+
+    const registerWithBackend = async () => {
+      try {
+        console.log('[NativePush] Associating token with logged in user:', user.cpf);
+        const info = await Device.getInfo();
+        await FidelimaxApiService.registerPushToken(user.cpf, fcmToken, `${info.model} (${info.platform})`);
+      } catch (err) {
+        console.error('[NativePush] Failed to register token with backend:', err);
+      }
+    };
+
+    registerWithBackend();
+  }, [user?.cpf, authToken, fcmToken]);
 };

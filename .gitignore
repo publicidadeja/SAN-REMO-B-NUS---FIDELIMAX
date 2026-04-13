@@ -11,3 +11,6 @@ coverage/
 
 # Backups
 *.zip
+
+# Security
+android/key

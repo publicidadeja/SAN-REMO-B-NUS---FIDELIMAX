@@ -58,6 +58,8 @@ interface AppState {
   markNotificationAsRead: (id: string) => Promise<void>;
   fetchAdminNotifications: () => Promise<any[]>;
   deleteNotification: (id: string) => Promise<void>;
+  fcmToken: string | null;
+  setFcmToken: (token: string | null) => void;
 }
 
 const getStoredUser = () => {
@@ -87,6 +89,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   myActivations: [],
   adminMetrics: null,
   pamphletImages: [],
+  fcmToken: null,
+
+  setFcmToken: (token) => set({ fcmToken: token }),
 
   login: async (cpf: string) => {
     set({ isLoading: true, error: null });
