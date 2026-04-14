@@ -1,4 +1,4 @@
-package br.com.sanremobonus.app;
+package sanremobonus.com;
 
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
