@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
+import http2 from 'http2';
 import admin from 'firebase-admin';
 import axios from 'axios';
 import multer from 'multer';
@@ -12,20 +13,110 @@ import jwt from 'jsonwebtoken';
 
 const prisma = new PrismaClient();
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-change-me';
+type StoredPushToken = {
+  token: string;
+  device: string | null;
+  userCpf: string;
+};
 
-// Helper function to get tokens for a user or global
-async function getPushTokens(userCpf?: string) {
+type PushTransport = 'android_fcm' | 'ios_apns';
+
+let cachedApnsJwt: { token: string; issuedAt: number } | null = null;
+
+function getApnsAuthKey(): string | null {
+  if (process.env.APNS_AUTH_KEY?.trim()) {
+    return process.env.APNS_AUTH_KEY.replace(/\\n/g, '\n');
+  }
+
+  if (process.env.APNS_AUTH_KEY_PATH?.trim() && fs.existsSync(process.env.APNS_AUTH_KEY_PATH)) {
+    return fs.readFileSync(process.env.APNS_AUTH_KEY_PATH, 'utf8');
+  }
+
+  return null;
+}
+
+function hasApnsConfig() {
+  return Boolean(
+    process.env.APNS_KEY_ID &&
+    process.env.APNS_TEAM_ID &&
+    process.env.APNS_BUNDLE_ID &&
+    getApnsAuthKey()
+  );
+}
+
+function getApnsJwt(): string {
+  const authKey = getApnsAuthKey();
+  const keyId = process.env.APNS_KEY_ID;
+  const teamId = process.env.APNS_TEAM_ID;
+
+  if (!authKey || !keyId || !teamId) {
+    throw new Error('APNs credentials are incomplete. Set APNS_AUTH_KEY or APNS_AUTH_KEY_PATH, APNS_KEY_ID and APNS_TEAM_ID.');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+
+  if (cachedApnsJwt && now - cachedApnsJwt.issuedAt < 50 * 60) {
+    return cachedApnsJwt.token;
+  }
+
+  const token = jwt.sign(
+    { iss: teamId, iat: now },
+    authKey,
+    {
+      algorithm: 'ES256',
+      header: {
+        alg: 'ES256',
+        kid: keyId,
+      },
+    }
+  );
+
+  cachedApnsJwt = { token, issuedAt: now };
+  return token;
+}
+
+function detectPushTransport(record: StoredPushToken): PushTransport {
+  const device = (record.device || '').toLowerCase();
+  const compactToken = record.token.replace(/\s+/g, '');
+  const looksLikeApnsToken = /^[a-f0-9]{64,200}$/i.test(compactToken) && !compactToken.includes(':');
+
+  if (looksLikeApnsToken) {
+    return 'ios_apns';
+  }
+
+  if (compactToken.includes(':')) {
+    return 'android_fcm';
+  }
+
+  if (device.includes('(ios)') || device.includes('iphone') || device.includes('ipad')) {
+    return 'ios_apns';
+  }
+
+  if (device.includes('(android)')) {
+    return 'android_fcm';
+  }
+
+  return 'android_fcm';
+}
+
+async function getPushTokenRecords(userCpf?: string): Promise<StoredPushToken[]> {
   if (userCpf && userCpf !== '__GLOBAL__') {
     // @ts-ignore
-    const tokens = await prisma.pushToken.findMany({
-      where: { userCpf: userCpf.replace(/\D/g, '') }
+    return prisma.pushToken.findMany({
+      where: { userCpf: userCpf.replace(/\D/g, '') },
+      select: { token: true, device: true, userCpf: true },
     });
-    return tokens.map(t => t.token);
-  } else {
-    // @ts-ignore
-    const tokens = await prisma.pushToken.findMany();
-    return tokens.map(t => t.token);
   }
+
+  // @ts-ignore
+  return prisma.pushToken.findMany({
+    select: { token: true, device: true, userCpf: true },
+  });
+}
+
+async function cleanupInvalidPushToken(token: string) {
+  // @ts-ignore
+  await prisma.pushToken.deleteMany({ where: { token } }).catch(() => {});
 }
 
 // Multimedia Stories Persistence Config
@@ -123,109 +214,164 @@ try {
   console.error('Failed to initialize Firebase Admin:', error);
 }
 
-// Helper to send Push Notifications via FCM
-async function sendPushNotification(title: string, body: string, userCpf?: string, data: Record<string, any> = {}) {
+async function sendFcmNotification(record: StoredPushToken, title: string, body: string, data: Record<string, string>) {
   if (admin.apps.length === 0) {
-    console.log(`[Push MOCK] Title: ${title} | Body: ${body} | User: ${userCpf || 'ALL'}`);
-    return;
+    console.log(`[Push MOCK][FCM] Title: ${title} | Body: ${body} | Token: ${record.token}`);
+    return { success: false, mocked: true };
   }
 
+  const message = {
+    notification: { title, body },
+    data,
+    token: record.token,
+    android: {
+      priority: 'high' as const,
+      notification: {
+        sound: 'notification',
+        channelId: 'default',
+      },
+    },
+  };
+
   try {
-    const tokens = await getPushTokens(userCpf);
-    
-    if (tokens.length === 0) {
+    await admin.messaging().send(message);
+    return { success: true };
+  } catch (error: any) {
+    console.error(`[Push][FCM] Error sending to token ${record.token}:`, error.message);
+
+    if (error.code === 'messaging/registration-token-not-registered' || error.code === 'messaging/invalid-registration-token') {
+      await cleanupInvalidPushToken(record.token);
+    }
+
+    return { success: false, error: error.message };
+  }
+}
+
+async function sendApnsNotification(record: StoredPushToken, title: string, body: string, data: Record<string, any>) {
+  if (!hasApnsConfig()) {
+    console.warn(`[Push][APNs] Missing APNs configuration. Skipping token ${record.token}`);
+    return { success: false, skipped: true, reason: 'missing_apns_config' };
+  }
+
+  const apnsHost = process.env.APNS_USE_SANDBOX === 'true'
+    ? 'https://api.sandbox.push.apple.com'
+    : 'https://api.push.apple.com';
+
+  const jwtToken = getApnsJwt();
+  const bundleId = process.env.APNS_BUNDLE_ID!;
+  const payload = {
+    aps: {
+      alert: { title, body },
+      sound: 'notification.mp3',
+      badge: 1,
+    },
+    ...data,
+  };
+
+  return new Promise<{ success: boolean; reason?: string; status?: number }>((resolve) => {
+    const client = http2.connect(apnsHost);
+    const request = client.request({
+      ':method': 'POST',
+      ':path': `/3/device/${record.token}`,
+      authorization: `bearer ${jwtToken}`,
+      'apns-topic': bundleId,
+      'apns-push-type': 'alert',
+      'apns-priority': '10',
+    });
+
+    let responseBody = '';
+    let statusCode = 0;
+
+    request.setEncoding('utf8');
+
+    request.on('response', (headers) => {
+      statusCode = Number(headers[':status'] || 0);
+    });
+
+    request.on('data', (chunk) => {
+      responseBody += chunk;
+    });
+
+    request.on('end', async () => {
+      client.close();
+
+      if (statusCode === 200) {
+        resolve({ success: true, status: statusCode });
+        return;
+      }
+
+      let reason = 'unknown';
+
+      try {
+        const parsed = responseBody ? JSON.parse(responseBody) : null;
+        reason = parsed?.reason || reason;
+      } catch {
+        reason = responseBody || reason;
+      }
+
+      console.error(`[Push][APNs] Error ${statusCode} for token ${record.token}: ${reason}`);
+
+      if (statusCode === 410 || reason === 'BadDeviceToken' || reason === 'Unregistered' || reason === 'DeviceTokenNotForTopic') {
+        await cleanupInvalidPushToken(record.token);
+      }
+
+      resolve({ success: false, reason, status: statusCode });
+    });
+
+    request.on('error', (error) => {
+      client.destroy();
+      console.error(`[Push][APNs] Connection error for token ${record.token}:`, error.message);
+      resolve({ success: false, reason: error.message });
+    });
+
+    request.end(JSON.stringify(payload));
+  });
+}
+
+// Helper to send Push Notifications via FCM (Android) and APNs (iOS)
+async function sendPushNotification(title: string, body: string, userCpf?: string, data: Record<string, any> = {}) {
+  try {
+    const records = await getPushTokenRecords(userCpf);
+
+    if (records.length === 0) {
       console.log(`[Push] No tokens found for ${userCpf || 'Global broadcast'}`);
       return;
     }
 
-    // FCM 'data' values MUST be strings.
-    // We sanitize the data object here.
-    const sanitizedData: Record<string, string> = {};
+    const sanitizedFcmData: Record<string, string> = {};
     for (const key in data) {
       if (data[key] !== undefined && data[key] !== null) {
-        if (typeof data[key] === 'object') {
-          sanitizedData[key] = JSON.stringify(data[key]);
-        } else {
-          sanitizedData[key] = String(data[key]);
-        }
+        sanitizedFcmData[key] = typeof data[key] === 'object'
+          ? JSON.stringify(data[key])
+          : String(data[key]);
       }
     }
 
-    if (userCpf && userCpf !== '__GLOBAL__') {
-      // Send to specific user tokens
-      for (const token of tokens) {
-        const message = {
-          notification: { title, body },
-          data: { ...sanitizedData, cpf: userCpf },
-          token: token,
-          android: {
-            priority: 'high' as const,
-            notification: { 
-              sound: 'notification',
-              channelId: 'default' 
-            }
-          },
-          apns: {
-            payload: {
-              aps: { 
-                sound: 'notification.mp3',
-                badge: 1 
-              }
-            }
-          }
-        };
+    const finalFcmData = userCpf && userCpf !== '__GLOBAL__'
+      ? { ...sanitizedFcmData, cpf: userCpf }
+      : { ...sanitizedFcmData, type: 'global_announcement' };
 
-        try {
-          await admin.messaging().send(message);
-          console.log(`[Push] Sent to ${userCpf}: ${title}`);
-        } catch (error: any) {
-          console.error(`[Push] Error sending to token ${token}:`, error.message);
-          if (error.code === 'messaging/registration-token-not-registered' || error.code === 'messaging/invalid-registration-token') {
-             // @ts-ignore
-             await prisma.pushToken.deleteMany({ where: { token } }).catch(() => {});
-          }
-        }
-      }
-    } else {
-      // Global Push
-      const response = await admin.messaging().sendEachForMulticast({
-        tokens,
-        notification: { title, body },
-        data: { ...sanitizedData, type: 'global_announcement' },
-        android: {
-          priority: 'high' as const,
-          notification: { 
-            sound: 'notification',
-            channelId: 'default' 
-          }
-        },
-        apns: {
-          payload: {
-            aps: { 
-              sound: 'notification.mp3',
-              badge: 1 
-            }
-          }
-        }
-      });
-      
-      console.log(`[Push] Global broadcast to ${tokens.length} tokens. Success: ${response.successCount}, Failure: ${response.failureCount}`);
+    const finalApnsData = userCpf && userCpf !== '__GLOBAL__'
+      ? { ...data, cpf: userCpf }
+      : { ...data, type: 'global_announcement' };
 
-      // Cleanup failed tokens
-      if (response.failureCount > 0) {
-        response.responses.forEach(async (resp, idx) => {
-          if (!resp.success) {
-            const errorCode = resp.error?.code;
-            if (errorCode === 'messaging/registration-token-not-registered' || errorCode === 'messaging/invalid-registration-token') {
-              const failedToken = tokens[idx];
-              // @ts-ignore
-              await prisma.pushToken.deleteMany({ where: { token: failedToken } }).catch(() => {});
-              console.log(`[Push] Cleaned up invalid token: ${failedToken}`);
-            }
-          }
-        });
+    let successCount = 0;
+    let failureCount = 0;
+
+    for (const record of records) {
+      const transport = detectPushTransport(record);
+      const result = transport === 'ios_apns'
+        ? await sendApnsNotification(record, title, body, finalApnsData)
+        : await sendFcmNotification(record, title, body, finalFcmData);
+
+      if (result.success) {
+        successCount += 1;
+      } else if (!('mocked' in result) && !('skipped' in result)) {
+        failureCount += 1;
       }
     }
+
+    console.log(`[Push] Sent "${title}" to ${records.length} token(s). Success: ${successCount}, Failure: ${failureCount}`);
   } catch (error) {
     console.error('[Push] Error sending notification:', error);
   }
@@ -368,15 +514,16 @@ async function startServer() {
       return res.status(400).json({ error: 'CPF and Token are required' });
     }
     const cleanCpf = cpf.replace(/\D/g, '');
+    const normalizedToken = String(token).trim();
     
     try {
       // @ts-ignore
       await prisma.pushToken.upsert({
-        where: { token },
+        where: { token: normalizedToken },
         update: { userCpf: cleanCpf, device, updatedAt: new Date() },
-        create: { userCpf: cleanCpf, token, device }
+        create: { userCpf: cleanCpf, token: normalizedToken, device }
       });
-      console.log(`[Push] Token registered in DB for CPF: ${cleanCpf}`);
+      console.log(`[Push] Token registered in DB for CPF: ${cleanCpf} (${device || 'unknown device'})`);
       res.json({ success: true });
     } catch (error) {
       console.error('[Push] Registration error:', error);
