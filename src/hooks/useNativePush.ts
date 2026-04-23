@@ -21,22 +21,6 @@ export const useNativePush = () => {
 
         console.log('[NativePush] Initializing native push logic...');
 
-        let permStatus = await PushNotifications.checkPermissions();
-
-        if (permStatus.receive === 'prompt') {
-          console.log('[NativePush] Requesting permissions...');
-          permStatus = await PushNotifications.requestPermissions();
-        }
-
-        if (permStatus.receive !== 'granted') {
-          console.warn('[NativePush] Notification permissions not granted.');
-          return;
-        }
-
-        // Register with Apple / Google to get the token
-        await PushNotifications.register();
-
-        // Listeners
         PushNotifications.addListener('registration', (token: Token) => {
           console.log('[NativePush] Token received:', token.value);
           setFcmToken(token.value);
@@ -57,6 +41,20 @@ export const useNativePush = () => {
           }
         });
 
+        let permStatus = await PushNotifications.checkPermissions();
+
+        if (permStatus.receive === 'prompt') {
+          console.log('[NativePush] Requesting permissions...');
+          permStatus = await PushNotifications.requestPermissions();
+        }
+
+        if (permStatus.receive !== 'granted') {
+          console.warn('[NativePush] Notification permissions not granted.');
+          return;
+        }
+
+        // Register with Apple / Google to get the token
+        await PushNotifications.register();
       } catch (err) {
         console.error('[NativePush] Initialization error:', err);
       }
