@@ -1,15 +1,53 @@
-import 'dotenv/config';
 import express from 'express';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import http2 from 'http2';
+import dotenv from 'dotenv';
 import admin from 'firebase-admin';
 import axios from 'axios';
 import multer from 'multer';
 import { PrismaClient } from '@prisma/client';
 import jwt from 'jsonwebtoken';
+
+function normalizeEnvValue(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  const hasMatchingQuotes =
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"));
+
+  return hasMatchingQuotes ? trimmed.slice(1, -1) : trimmed;
+}
+
+function loadEnvFile(fileName: string, options: { override?: boolean; ignoreEmpty?: boolean } = {}) {
+  const envPath = path.resolve(process.cwd(), fileName);
+  if (!fs.existsSync(envPath)) return;
+
+  const parsed = dotenv.parse(fs.readFileSync(envPath));
+  for (const [key, value] of Object.entries(parsed)) {
+    const normalizedValue = normalizeEnvValue(value);
+
+    if (options.ignoreEmpty && !normalizedValue) continue;
+    if (!options.override && process.env[key] !== undefined) continue;
+
+    process.env[key] = value;
+  }
+}
+
+loadEnvFile('.env');
+const nodeEnv = normalizeEnvValue(process.env.NODE_ENV);
+if (nodeEnv) {
+  loadEnvFile(`.env.${nodeEnv}`, { override: true, ignoreEmpty: true });
+}
+
+function getEnvValue(name: string): string | undefined {
+  return normalizeEnvValue(process.env[name]);
+}
 
 const prisma = new PrismaClient();
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-change-me';
@@ -20,34 +58,48 @@ type StoredPushToken = {
 };
 
 type PushTransport = 'android_fcm' | 'ios_apns';
+type PushSendResult =
+  | { success: true; status?: number }
+  | { success: false; mocked?: boolean; skipped?: boolean; reason?: string; status?: number; error?: string };
 
 let cachedApnsJwt: { token: string; issuedAt: number } | null = null;
 
 function getApnsAuthKey(): string | null {
-  if (process.env.APNS_AUTH_KEY?.trim()) {
-    return process.env.APNS_AUTH_KEY.replace(/\\n/g, '\n');
+  const inlineKey = getEnvValue('APNS_AUTH_KEY');
+  if (inlineKey) {
+    return inlineKey.replace(/\\n/g, '\n');
   }
 
-  if (process.env.APNS_AUTH_KEY_PATH?.trim() && fs.existsSync(process.env.APNS_AUTH_KEY_PATH)) {
-    return fs.readFileSync(process.env.APNS_AUTH_KEY_PATH, 'utf8');
+  const keyPath = getEnvValue('APNS_AUTH_KEY_PATH');
+  if (keyPath) {
+    const resolvedPath = path.isAbsolute(keyPath) ? keyPath : path.resolve(process.cwd(), keyPath);
+    if (fs.existsSync(resolvedPath)) {
+      return fs.readFileSync(resolvedPath, 'utf8');
+    }
   }
 
   return null;
 }
 
+function getApnsMissingConfigFields() {
+  const missing: string[] = [];
+
+  if (!getEnvValue('APNS_KEY_ID')) missing.push('APNS_KEY_ID');
+  if (!getEnvValue('APNS_TEAM_ID')) missing.push('APNS_TEAM_ID');
+  if (!getEnvValue('APNS_BUNDLE_ID')) missing.push('APNS_BUNDLE_ID');
+  if (!getApnsAuthKey()) missing.push('APNS_AUTH_KEY or APNS_AUTH_KEY_PATH');
+
+  return missing;
+}
+
 function hasApnsConfig() {
-  return Boolean(
-    process.env.APNS_KEY_ID &&
-    process.env.APNS_TEAM_ID &&
-    process.env.APNS_BUNDLE_ID &&
-    getApnsAuthKey()
-  );
+  return getApnsMissingConfigFields().length === 0;
 }
 
 function getApnsJwt(): string {
   const authKey = getApnsAuthKey();
-  const keyId = process.env.APNS_KEY_ID;
-  const teamId = process.env.APNS_TEAM_ID;
+  const keyId = getEnvValue('APNS_KEY_ID');
+  const teamId = getEnvValue('APNS_TEAM_ID');
 
   if (!authKey || !keyId || !teamId) {
     throw new Error('APNs credentials are incomplete. Set APNS_AUTH_KEY or APNS_AUTH_KEY_PATH, APNS_KEY_ID and APNS_TEAM_ID.');
@@ -79,6 +131,10 @@ function detectPushTransport(record: StoredPushToken): PushTransport {
   const device = (record.device || '').toLowerCase();
   const compactToken = record.token.replace(/\s+/g, '');
   const looksLikeApnsToken = /^[a-f0-9]{64,200}$/i.test(compactToken) && !compactToken.includes(':');
+
+  if (device.includes(':fcm') || device.includes('(fcm') || device.includes('firebase')) {
+    return 'android_fcm';
+  }
 
   if (looksLikeApnsToken) {
     return 'ios_apns';
@@ -117,6 +173,10 @@ async function getPushTokenRecords(userCpf?: string): Promise<StoredPushToken[]>
 async function cleanupInvalidPushToken(token: string) {
   // @ts-ignore
   await prisma.pushToken.deleteMany({ where: { token } }).catch(() => {});
+}
+
+function describePushTarget(record: StoredPushToken) {
+  return `${record.userCpf || 'unknown cpf'} / ${record.device || 'unknown device'}`;
 }
 
 // Multimedia Stories Persistence Config
@@ -214,10 +274,29 @@ try {
   console.error('Failed to initialize Firebase Admin:', error);
 }
 
-async function sendFcmNotification(record: StoredPushToken, title: string, body: string, data: Record<string, string>) {
+function logPushProviderStatus() {
+  if (admin.apps.length > 0) {
+    console.log('[Push][FCM] Android push enabled via Firebase Admin.');
+  }
+
+  const missingApnsFields = getApnsMissingConfigFields();
+  if (missingApnsFields.length > 0) {
+    console.warn(`[Push][APNs] iOS push disabled. Missing: ${missingApnsFields.join(', ')}.`);
+    return;
+  }
+
+  const apnsGateway = getEnvValue('APNS_USE_SANDBOX')?.toLowerCase() === 'true'
+    ? 'sandbox'
+    : 'production';
+  console.log(`[Push][APNs] iOS push enabled via ${apnsGateway} gateway for topic ${getEnvValue('APNS_BUNDLE_ID')}.`);
+}
+
+logPushProviderStatus();
+
+async function sendFcmNotification(record: StoredPushToken, title: string, body: string, data: Record<string, string>): Promise<PushSendResult> {
   if (admin.apps.length === 0) {
-    console.log(`[Push MOCK][FCM] Title: ${title} | Body: ${body} | Token: ${record.token}`);
-    return { success: false, mocked: true };
+    console.log(`[Push MOCK][FCM] Title: ${title} | Body: ${body} | Target: ${describePushTarget(record)}`);
+    return { success: false, mocked: true, reason: 'missing_firebase_admin' };
   }
 
   const message = {
@@ -231,13 +310,24 @@ async function sendFcmNotification(record: StoredPushToken, title: string, body:
         channelId: 'default',
       },
     },
+    apns: {
+      headers: {
+        'apns-priority': '10',
+      },
+      payload: {
+        aps: {
+          sound: 'notification.mp3',
+          badge: 1,
+        },
+      },
+    },
   };
 
   try {
     await admin.messaging().send(message);
     return { success: true };
   } catch (error: any) {
-    console.error(`[Push][FCM] Error sending to token ${record.token}:`, error.message);
+    console.error(`[Push][FCM] Error sending to ${describePushTarget(record)}:`, error.message);
 
     if (error.code === 'messaging/registration-token-not-registered' || error.code === 'messaging/invalid-registration-token') {
       await cleanupInvalidPushToken(record.token);
@@ -247,18 +337,18 @@ async function sendFcmNotification(record: StoredPushToken, title: string, body:
   }
 }
 
-async function sendApnsNotification(record: StoredPushToken, title: string, body: string, data: Record<string, any>) {
+async function sendApnsNotification(record: StoredPushToken, title: string, body: string, data: Record<string, any>): Promise<PushSendResult> {
   if (!hasApnsConfig()) {
-    console.warn(`[Push][APNs] Missing APNs configuration. Skipping token ${record.token}`);
+    console.warn(`[Push][APNs] Missing APNs configuration. Skipping ${describePushTarget(record)}.`);
     return { success: false, skipped: true, reason: 'missing_apns_config' };
   }
 
-  const apnsHost = process.env.APNS_USE_SANDBOX === 'true'
+  const apnsHost = getEnvValue('APNS_USE_SANDBOX')?.toLowerCase() === 'true'
     ? 'https://api.sandbox.push.apple.com'
     : 'https://api.push.apple.com';
 
   const jwtToken = getApnsJwt();
-  const bundleId = process.env.APNS_BUNDLE_ID!;
+  const bundleId = getEnvValue('APNS_BUNDLE_ID')!;
   const payload = {
     aps: {
       alert: { title, body },
@@ -268,7 +358,7 @@ async function sendApnsNotification(record: StoredPushToken, title: string, body
     ...data,
   };
 
-  return new Promise<{ success: boolean; reason?: string; status?: number }>((resolve) => {
+  return new Promise<PushSendResult>((resolve) => {
     const client = http2.connect(apnsHost);
     const request = client.request({
       ':method': 'POST',
@@ -309,7 +399,7 @@ async function sendApnsNotification(record: StoredPushToken, title: string, body
         reason = responseBody || reason;
       }
 
-      console.error(`[Push][APNs] Error ${statusCode} for token ${record.token}: ${reason}`);
+      console.error(`[Push][APNs] Error ${statusCode} for ${describePushTarget(record)}: ${reason}`);
 
       if (statusCode === 410 || reason === 'BadDeviceToken' || reason === 'Unregistered' || reason === 'DeviceTokenNotForTopic') {
         await cleanupInvalidPushToken(record.token);
@@ -320,7 +410,7 @@ async function sendApnsNotification(record: StoredPushToken, title: string, body
 
     request.on('error', (error) => {
       client.destroy();
-      console.error(`[Push][APNs] Connection error for token ${record.token}:`, error.message);
+      console.error(`[Push][APNs] Connection error for ${describePushTarget(record)}:`, error.message);
       resolve({ success: false, reason: error.message });
     });
 
@@ -366,8 +456,11 @@ async function sendPushNotification(title: string, body: string, userCpf?: strin
 
       if (result.success) {
         successCount += 1;
-      } else if (!('mocked' in result) && !('skipped' in result)) {
+      } else {
         failureCount += 1;
+        const failedResult = result as Extract<PushSendResult, { success: false }>;
+        const reason = failedResult.reason || failedResult.error || 'unknown';
+        console.warn(`[Push] ${transport} delivery failed for ${describePushTarget(record)}: ${reason}`);
       }
     }
 
@@ -401,6 +494,159 @@ function authorizeAdmin(req: any, res: any, next: any) {
     return res.status(403).json({ error: 'Permissão insuficiente.' });
   }
   next();
+}
+
+function parseBoolean(value: any) {
+  return value === true || value === 'true' || value === '1' || value === 1;
+}
+
+function parseOptionalFloat(value: any) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = parseFloat(String(value).replace(',', '.'));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseOptionalDate(value: any) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function generateCouponNumber() {
+  const timePart = Date.now().toString(36).toUpperCase();
+  const randomPart = Math.random().toString(36).slice(2, 7).toUpperCase();
+  return `SR-${timePart}-${randomPart}`;
+}
+
+function formatCurrency(value: number | null | undefined) {
+  if (!value || value <= 0) return 'R$ 0,00';
+  return `R$ ${value.toFixed(2).replace('.', ',')}`;
+}
+
+const RAFFLE_KEYWORDS = [
+  'sorteio',
+  'sortear',
+  'sortea',
+  'sorteado',
+  'sorteada',
+  'premio',
+  'premios',
+  'experiencias incriveis',
+  'cupom para participar',
+  'cupons para participar',
+  'ganha 01 cupom',
+  'ganha 1 cupom'
+];
+
+function normalizeSearchText(value: any) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function hasRaffleKeyword(...values: any[]) {
+  const text = normalizeSearchText(values.filter(Boolean).join(' '));
+  return RAFFLE_KEYWORDS.some((keyword) => text.includes(keyword));
+}
+
+function isRaffleLikeProduct(product: any) {
+  return product?.promotionType === 'raffle'
+    || Boolean(product?.drawDate || product?.prizeDescription || Number(product?.minPurchaseValue || 0) > 0)
+    || hasRaffleKeyword(product?.name, product?.description, product?.prizeDescription, product?.participationInstructions);
+}
+
+function isSuccessfulFidelimaxResponse(payload: any) {
+  return payload?.CodigoResposta === 100 || payload?.success === true || payload?.sucesso === true;
+}
+
+async function approvePendingRaffleEntriesForPurchase(userCpf: any, purchaseAmount: any, source: string = 'fidelimax_points') {
+  const cleanCpf = String(userCpf || '').replace(/\D/g, '');
+  const amount = parseOptionalFloat(purchaseAmount);
+
+  if (!cleanCpf || !amount || amount <= 0) {
+    return [];
+  }
+
+  const pendingEntries = await prisma.productActivation.findMany({
+    where: {
+      userCpf: cleanCpf,
+      validationStatus: 'pending',
+      product: {
+        expiresAt: { gt: new Date() }
+      }
+    },
+    include: { product: true },
+    orderBy: { activatedAt: 'asc' }
+  });
+
+  const approvedEntries: any[] = [];
+  const validatedProductIds = new Set<string>();
+
+  for (const entry of pendingEntries) {
+    const product = entry.product;
+    const minimumPurchase = Number(product?.minPurchaseValue || 0);
+
+    if (
+      !isRaffleLikeProduct(product)
+      || minimumPurchase <= 0
+      || amount < minimumPurchase
+      || validatedProductIds.has(entry.productId)
+    ) {
+      continue;
+    }
+
+    const updated = await prisma.productActivation.update({
+      where: { id: entry.id },
+      data: {
+        validationStatus: 'approved',
+        purchaseAmount: amount,
+        couponNumber: entry.couponNumber || generateCouponNumber(),
+        validatedAt: new Date()
+      },
+      include: { product: true }
+    });
+
+    validatedProductIds.add(entry.productId);
+    approvedEntries.push(updated);
+
+    await prisma.notification.create({
+      data: {
+        userCpf: cleanCpf,
+        title: 'Cupom de Sorteio Confirmado!',
+        message: `Sua compra pontuada de ${formatCurrency(amount)} confirmou o cupom ${updated.couponNumber} para ${updated.product.name}.`,
+        type: 'reward',
+        // @ts-ignore
+        actionUrl: '/rewards?tab=activations'
+      }
+    });
+
+    await sendPushNotification(
+      'Cupom de Sorteio Confirmado!',
+      `Seu cupom ${updated.couponNumber} foi confirmado automaticamente pela pontuação Fidelimax.`,
+      cleanCpf,
+      {
+        type: 'raffle_entry_auto_approved',
+        productId: updated.productId,
+        participantId: updated.id,
+        couponNumber: updated.couponNumber || '',
+        source
+      }
+    );
+  }
+
+  if (approvedEntries.length > 0) {
+    console.log(`[Raffle] Auto-approved ${approvedEntries.length} raffle entrie(s) for CPF ${cleanCpf} from ${formatCurrency(amount)} (${source}).`);
+  }
+
+  return approvedEntries.map((entry) => ({
+    id: entry.id,
+    productId: entry.productId,
+    productName: entry.product.name,
+    couponNumber: entry.couponNumber,
+    purchaseAmount: entry.purchaseAmount,
+    validationStatus: entry.validationStatus
+  }));
 }
 
 async function startServer() {
@@ -504,6 +750,52 @@ async function startServer() {
       res.status(isConfigError ? 400 : 500).json({ 
         error: isConfigError ? 'Configuração incompleta: Chave API Fidelimax não encontrada.' : 'Erro ao validar acesso com o sistema Fidelimax.' 
       });
+    }
+  });
+
+  // Consumer Registration (public route that uses the server-side Fidelimax API key)
+  app.post('/api/auth/register-consumer', async (req, res) => {
+    const { nome, cpf, email, telefone, nascimento, sexo, endereco } = req.body || {};
+    if (!nome || !cpf || !email || !telefone || !nascimento) {
+      return res.status(400).json({ error: 'Nome, CPF, e-mail, telefone e nascimento são obrigatórios' });
+    }
+
+    const cleanCpf = String(cpf).replace(/\D/g, '');
+    if (cleanCpf.length !== 11) {
+      return res.status(400).json({ error: 'CPF inválido' });
+    }
+
+    console.log(`[API] Consumer Registration attempt: ${cleanCpf}`);
+
+    try {
+      const dbKey = await prisma.setting.findUnique({ where: { key: 'fidelimax_api_key' } });
+      if (!dbKey?.value) {
+        return res.status(500).json({ error: 'Configuração do sistema incompleta (API Key ausente)' });
+      }
+
+      const response = await axios.post(
+        'https://api.fidelimax.com.br/api/Integracao/CadastrarConsumidor',
+        {
+          nome,
+          cpf: cleanCpf,
+          email,
+          telefone,
+          nascimento,
+          sexo,
+          endereco,
+        },
+        { headers: { 'AuthToken': dbKey.value, 'Content-Type': 'application/json' } }
+      );
+
+      res.status(response.status).json(response.data);
+    } catch (error: any) {
+      if (error.response) {
+        console.error(`[API] Consumer Registration Fidelimax error: ${error.response.status} -`, error.response.data);
+        return res.status(error.response.status).json(error.response.data);
+      }
+
+      console.error('[API] Consumer Registration error:', error.message);
+      res.status(500).json({ error: 'Erro ao cadastrar consumidor no sistema Fidelimax.' });
     }
   });
 
@@ -922,8 +1214,32 @@ async function startServer() {
         },
         params: req.query
       });
-      
-      res.status(response.status).json(response.data);
+
+      const responsePayload = response.data;
+      const isPointCreditRoute = normalizeSearchText(targetPath).includes('integracao/pontuaconsumidor');
+      if (isPointCreditRoute && isSuccessfulFidelimaxResponse(responsePayload)) {
+        try {
+          const purchaseAmount = req.body?.pontuacao_reais
+            ?? req.body?.valor_compra
+            ?? req.body?.valorCompra
+            ?? req.body?.valor
+            ?? req.body?.amount
+            ?? req.body?.purchaseAmount;
+          const autoApprovedRaffleEntries = await approvePendingRaffleEntriesForPurchase(
+            req.body?.cpf,
+            purchaseAmount,
+            'fidelimax_points'
+          );
+
+          if (autoApprovedRaffleEntries.length > 0 && responsePayload && typeof responsePayload === 'object') {
+            responsePayload.autoApprovedRaffleEntries = autoApprovedRaffleEntries;
+          }
+        } catch (raffleError) {
+          console.error('[Raffle] Auto approval after Fidelimax points failed:', raffleError);
+        }
+      }
+
+      res.status(response.status).json(responsePayload);
     } catch (error: any) {
       if (error.response) {
         console.error(`[Proxy] Error from Fidelimax: ${error.response.status} -`, error.response.data);
@@ -1045,6 +1361,7 @@ async function startServer() {
   app.get('/api/activation-products', async (req, res) => {
     const { cpf } = req.query;
     const now = new Date();
+    const cleanCpf = cpf ? String(cpf).replace(/\D/g, '') : '';
     try {
       const products = await prisma.activationProduct.findMany({
         where: { expiresAt: { gt: now } },
@@ -1052,8 +1369,11 @@ async function startServer() {
         include: {
           createdBy: { select: { name: true } },
           activations: cpf ? {
-            where: { userCpf: String(cpf).replace(/\D/g, '') }
-          } : false
+            where: { userCpf: cleanCpf },
+            orderBy: { activatedAt: 'desc' }
+          } : {
+            select: { id: true, validationStatus: true, isWinner: true }
+          }
         }
       });
       const startOfMonth = new Date();
@@ -1061,17 +1381,25 @@ async function startServer() {
       startOfMonth.setHours(0, 0, 0, 0);
 
       const productsWithStatus = products.map(p => {
-        const userActivations = p.activations.filter(a => {
+        const rawActivations = p.activations || [];
+        const userActivations = cpf ? rawActivations.filter((a: any) => {
           // @ts-ignore
           if (p.isMonthly) {
             return new Date(a.activatedAt) >= startOfMonth;
           }
           return true;
-        });
+        }) : rawActivations;
+        const normalizedPromotionType = isRaffleLikeProduct(p) ? 'raffle' : 'offer';
 
         return {
           ...p,
-          activations: userActivations
+          promotionType: normalizedPromotionType,
+          isFree: normalizedPromotionType === 'raffle' ? true : p.isFree,
+          activations: userActivations,
+          participantCount: rawActivations.length,
+          approvedParticipantCount: rawActivations.filter((a: any) => a.validationStatus === 'approved').length,
+          pendingParticipantCount: rawActivations.filter((a: any) => a.validationStatus === 'pending').length,
+          winnerCount: rawActivations.filter((a: any) => a.isWinner).length
         };
       });
 
@@ -1084,9 +1412,36 @@ async function startServer() {
 
   // POST Create Activation Product (Admin/Collab)
   app.post('/api/admin/activation-products', authenticate, authorizeAdmin, upload.single('file'), async (req: any, res: any) => {
-    const { name, description, originalPrice, promotionalPrice, limitPerCpf, redeemWindowHours, expiresAt, isMonthly, isFree, userId } = req.body;
+    const {
+      name,
+      description,
+      originalPrice,
+      promotionalPrice,
+      limitPerCpf,
+      redeemWindowHours,
+      expiresAt,
+      isMonthly,
+      isFree,
+      userId,
+      promotionType,
+      prizeDescription,
+      minPurchaseValue,
+      participationInstructions,
+      drawDate
+    } = req.body;
+    const minimumPurchase = parseOptionalFloat(minPurchaseValue);
+    const parsedDrawDate = parseOptionalDate(drawDate);
+    const requestLooksLikeRaffle = Boolean(
+      prizeDescription
+      || participationInstructions
+      || parsedDrawDate
+      || (minimumPurchase && minimumPurchase > 0)
+      || hasRaffleKeyword(name, description, prizeDescription, participationInstructions)
+    );
+    const normalizedPromotionType = promotionType === 'raffle' || requestLooksLikeRaffle ? 'raffle' : 'offer';
+    const isFreeProduct = parseBoolean(isFree) || normalizedPromotionType === 'raffle';
     
-    if (!name || (isFree === 'false' && (!originalPrice || !promotionalPrice))) {
+    if (!name || !expiresAt || (normalizedPromotionType === 'offer' && !isFreeProduct && (!originalPrice || !promotionalPrice))) {
       return res.status(400).json({ error: 'Dados obrigatórios ausentes' });
     }
 
@@ -1106,24 +1461,36 @@ async function startServer() {
           name,
           description,
           imageUrl: req.file ? `/uploads/${req.file.filename}` : null,
-          originalPrice: isFree === 'true' ? 0 : parseFloat(originalPrice),
-          promotionalPrice: isFree === 'true' ? 0 : parseFloat(promotionalPrice),
+          originalPrice: isFreeProduct ? 0 : parseFloat(originalPrice),
+          promotionalPrice: isFreeProduct ? 0 : parseFloat(promotionalPrice),
+          promotionType: normalizedPromotionType,
+          prizeDescription: prizeDescription || null,
+          minPurchaseValue: minimumPurchase && minimumPurchase > 0 ? minimumPurchase : null,
+          participationInstructions: participationInstructions || null,
+          drawDate: parsedDrawDate,
           limitPerCpf: parseInt(limitPerCpf) || 1,
           redeemWindowHours: parseInt(redeemWindowHours) || 24,
           expiresAt: new Date(expiresAt),
-          isMonthly: isMonthly === 'true',
-          isFree: isFree === 'true',
+          isMonthly: normalizedPromotionType === 'offer' && parseBoolean(isMonthly),
+          isFree: isFreeProduct,
           createdById: creatorId
         },
         include: { createdBy: { select: { name: true } } }
       });
 
       // Create GLOBAL notification for everyone
+      const notificationTitle = normalizedPromotionType === 'raffle'
+        ? 'Nova Promoção de Sorteio!'
+        : 'Nova Oferta Disponível!';
+      const notificationMessage = normalizedPromotionType === 'raffle'
+        ? `${name} está no ar. Participe pelo app${minimumPurchase && minimumPurchase > 0 ? ` e valide compras acima de ${formatCurrency(minimumPurchase)}.` : '.'}`
+        : `${name} acabou de chegar! Aproveite o preço promocional de R$ ${parseFloat(promotionalPrice).toFixed(2)} por tempo limitado.`;
+
       await prisma.notification.create({
         data: {
           userCpf: '__GLOBAL__',
-          title: '🔥 Nova Oferta Disponível!',
-          message: `${name} acabou de chegar! Aproveite o preço promocional de R$ ${parseFloat(promotionalPrice).toFixed(2)} por tempo limitado.`,
+          title: notificationTitle,
+          message: notificationMessage,
           type: 'reward',
           // @ts-ignore
           actionUrl: '/rewards?tab=activations'
@@ -1132,11 +1499,13 @@ async function startServer() {
 
       // Send Global Push
       await sendPushNotification(
-        '🔥 Nova Oferta Disponível!',
-        `${name} disponível por apenas R$ ${parseFloat(promotionalPrice).toFixed(2)}!`,
+        notificationTitle,
+        normalizedPromotionType === 'raffle'
+          ? `Toque para participar da promoção ${name}.`
+          : `${name} disponível por apenas R$ ${parseFloat(promotionalPrice).toFixed(2)}!`,
         '__GLOBAL__',
         { 
-          type: 'new_product', 
+          type: normalizedPromotionType === 'raffle' ? 'new_raffle' : 'new_product',
           productId: newProduct.id,
           url: '/rewards?tab=activations'
         }
@@ -1152,11 +1521,41 @@ async function startServer() {
   // PUT Update Activation Product
   app.put('/api/admin/activation-products/:id', authenticate, authorizeAdmin, upload.single('file'), async (req, res) => {
     const { id } = req.params;
-    const { name, description, originalPrice, promotionalPrice, limitPerCpf, redeemWindowHours, expiresAt, isMonthly, isFree } = req.body;
+    const {
+      name,
+      description,
+      originalPrice,
+      promotionalPrice,
+      limitPerCpf,
+      redeemWindowHours,
+      expiresAt,
+      isMonthly,
+      isFree,
+      promotionType,
+      prizeDescription,
+      minPurchaseValue,
+      participationInstructions,
+      drawDate
+    } = req.body;
     
     try {
       const existingProduct = await prisma.activationProduct.findUnique({ where: { id } });
       if (!existingProduct) return res.status(404).json({ error: 'Produto não encontrado' });
+      const minimumPurchase = parseOptionalFloat(minPurchaseValue);
+      const parsedDrawDate = parseOptionalDate(drawDate);
+      const requestLooksLikeRaffle = Boolean(
+        prizeDescription
+        || participationInstructions
+        || parsedDrawDate
+        || (minimumPurchase && minimumPurchase > 0)
+        || hasRaffleKeyword(name, description, prizeDescription, participationInstructions)
+      );
+      const normalizedPromotionType = promotionType === 'offer'
+        ? 'offer'
+        : promotionType === 'raffle' || requestLooksLikeRaffle || existingProduct.promotionType === 'raffle'
+          ? 'raffle'
+          : 'offer';
+      const nextIsFree = isFree !== undefined ? parseBoolean(isFree) || normalizedPromotionType === 'raffle' : normalizedPromotionType === 'raffle';
 
       let imageUrl = existingProduct.imageUrl;
       if (req.file) {
@@ -1173,13 +1572,18 @@ async function startServer() {
           name,
           description,
           imageUrl,
-          originalPrice: originalPrice ? parseFloat(originalPrice) : undefined,
-          promotionalPrice: promotionalPrice ? parseFloat(promotionalPrice) : undefined,
+          originalPrice: nextIsFree ? 0 : originalPrice ? parseFloat(originalPrice) : undefined,
+          promotionalPrice: nextIsFree ? 0 : promotionalPrice ? parseFloat(promotionalPrice) : undefined,
+          promotionType: normalizedPromotionType,
+          prizeDescription: prizeDescription !== undefined ? (prizeDescription || null) : undefined,
+          minPurchaseValue: minPurchaseValue !== undefined ? (minimumPurchase && minimumPurchase > 0 ? minimumPurchase : null) : undefined,
+          participationInstructions: participationInstructions !== undefined ? (participationInstructions || null) : undefined,
+          drawDate: drawDate !== undefined ? parsedDrawDate : undefined,
           limitPerCpf: limitPerCpf ? parseInt(limitPerCpf) : undefined,
           redeemWindowHours: redeemWindowHours ? parseInt(redeemWindowHours) : undefined,
           expiresAt: expiresAt ? new Date(expiresAt) : undefined,
-          isMonthly: isMonthly !== undefined ? isMonthly === 'true' : undefined,
-          isFree: isFree !== undefined ? isFree === 'true' : undefined
+          isMonthly: isMonthly !== undefined ? (normalizedPromotionType === 'offer' && parseBoolean(isMonthly)) : (normalizedPromotionType === 'raffle' ? false : undefined),
+          isFree: isFree !== undefined || normalizedPromotionType === 'raffle' ? nextIsFree : undefined
         }
       });
       res.json(updatedProduct);
@@ -1204,10 +1608,264 @@ async function startServer() {
     }
   });
 
+  // GET Raffle Participants
+  app.get('/api/admin/activation-products/:id/participants', authenticate, authorizeAdmin, async (req, res) => {
+    const { id } = req.params;
+    try {
+      const product = await prisma.activationProduct.findUnique({
+        where: { id },
+        include: {
+          activations: {
+            orderBy: [
+              { isWinner: 'desc' },
+              { activatedAt: 'desc' }
+            ]
+          }
+        }
+      });
+
+      if (!product) return res.status(404).json({ error: 'Promoção não encontrada' });
+      if (!isRaffleLikeProduct(product)) {
+        return res.status(400).json({ error: 'Esta promoção não é um sorteio' });
+      }
+
+      const stats = product.activations.reduce((acc: any, participant: any) => {
+        acc.total += 1;
+        acc[participant.validationStatus] = (acc[participant.validationStatus] || 0) + 1;
+        if (participant.isWinner) acc.winners += 1;
+        return acc;
+      }, { total: 0, pending: 0, approved: 0, rejected: 0, winners: 0 });
+
+      res.json({
+        product,
+        participants: product.activations,
+        stats
+      });
+    } catch (error) {
+      console.error('[API] Error fetching raffle participants:', error);
+      res.status(500).json({ error: 'Erro ao buscar participantes do sorteio' });
+    }
+  });
+
+  // PATCH Raffle Participant validation
+  app.patch('/api/admin/raffle-participants/:id', authenticate, authorizeAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { validationStatus, purchaseAmount } = req.body;
+    const nextStatus = ['pending', 'approved', 'rejected'].includes(validationStatus) ? validationStatus : null;
+
+    if (!nextStatus) {
+      return res.status(400).json({ error: 'Status de validação inválido' });
+    }
+
+    try {
+      const participant = await prisma.productActivation.findUnique({
+        where: { id },
+        include: { product: true }
+      });
+
+      if (!participant) return res.status(404).json({ error: 'Participante não encontrado' });
+      if (!isRaffleLikeProduct(participant.product)) {
+        return res.status(400).json({ error: 'Esta promoção não pertence a um sorteio' });
+      }
+
+      const amount = parseOptionalFloat(purchaseAmount);
+      const minimumPurchase = participant.product.minPurchaseValue || 0;
+      if (nextStatus === 'approved' && minimumPurchase > 0 && (!amount || amount < minimumPurchase)) {
+        return res.status(400).json({ error: `Informe uma compra de pelo menos ${formatCurrency(minimumPurchase)} para aprovar.` });
+      }
+
+      const updated = await prisma.productActivation.update({
+        where: { id },
+        data: {
+          validationStatus: nextStatus,
+          purchaseAmount: amount,
+          couponNumber: nextStatus === 'approved' ? (participant.couponNumber || generateCouponNumber()) : null,
+          validatedAt: nextStatus === 'approved' ? new Date() : null,
+          isWinner: nextStatus === 'rejected' ? false : participant.isWinner,
+          drawnAt: nextStatus === 'rejected' ? null : participant.drawnAt
+        },
+        include: { product: true }
+      });
+
+      if (nextStatus === 'approved') {
+        await prisma.notification.create({
+          data: {
+            userCpf: updated.userCpf,
+            title: 'Participação Validada!',
+            message: `Seu cupom ${updated.couponNumber} para ${updated.product.name} está confirmado no sorteio.`,
+            type: 'reward',
+            // @ts-ignore
+            actionUrl: '/rewards?tab=activations'
+          }
+        });
+
+        await sendPushNotification(
+          'Participação Validada!',
+          `Seu cupom ${updated.couponNumber} está confirmado no sorteio ${updated.product.name}.`,
+          updated.userCpf,
+          { type: 'raffle_entry_approved', productId: updated.productId, couponNumber: updated.couponNumber }
+        );
+      }
+
+      if (nextStatus === 'rejected') {
+        await prisma.notification.create({
+          data: {
+            userCpf: updated.userCpf,
+            title: 'Participação não validada',
+            message: `Sua participação em ${updated.product.name} não foi validada. Procure uma unidade San Remo para conferir os critérios.`,
+            type: 'info',
+            // @ts-ignore
+            actionUrl: '/rewards?tab=activations'
+          }
+        });
+      }
+
+      res.json(updated);
+    } catch (error) {
+      console.error('[API] Error validating raffle participant:', error);
+      res.status(500).json({ error: 'Erro ao validar participante' });
+    }
+  });
+
+  // POST Draw Raffle Winners
+  app.post('/api/admin/activation-products/:id/draw', authenticate, authorizeAdmin, async (req, res) => {
+    const { id } = req.params;
+    const requestedCount = Math.max(1, Math.min(parseInt(req.body?.winnerCount || req.body?.count || '1'), 50));
+    const redraw = parseBoolean(req.body?.redraw);
+
+    try {
+      const product = await prisma.activationProduct.findUnique({ where: { id } });
+      if (!product) return res.status(404).json({ error: 'Promoção não encontrada' });
+      if (!isRaffleLikeProduct(product)) {
+        return res.status(400).json({ error: 'Esta promoção não é um sorteio' });
+      }
+
+      if (product.drawDate && new Date(product.drawDate).getTime() > Date.now()) {
+        return res.status(400).json({ error: `O sorteio estará disponível em ${new Date(product.drawDate).toLocaleDateString('pt-BR')}.` });
+      }
+
+      if (redraw) {
+        await prisma.productActivation.updateMany({
+          where: { productId: id, isWinner: true },
+          data: { isWinner: false, drawnAt: null }
+        });
+      }
+
+      const eligibleParticipants = await prisma.productActivation.findMany({
+        where: {
+          productId: id,
+          validationStatus: 'approved',
+          isWinner: false
+        }
+      });
+
+      if (eligibleParticipants.length === 0) {
+        return res.status(400).json({ error: 'Não há participantes aprovados disponíveis para sortear.' });
+      }
+
+      if (eligibleParticipants.length < requestedCount) {
+        return res.status(400).json({
+          error: `Há apenas ${eligibleParticipants.length} participante(s) aprovado(s) disponível(is) para ${requestedCount} ganhador(es).`
+        });
+      }
+
+      const shuffledParticipants = [...eligibleParticipants].sort(() => Math.random() - 0.5);
+      const selectedParticipants = shuffledParticipants.slice(0, requestedCount);
+      const drawnAt = new Date();
+      const winners = await prisma.$transaction(selectedParticipants.map((participant) => (
+        prisma.productActivation.update({
+          where: { id: participant.id },
+          data: { isWinner: true, drawnAt },
+          include: { product: true }
+        })
+      )));
+
+      res.json({
+        product,
+        winners,
+        winnerCount: winners.length,
+        redraw,
+        drawnAt
+      });
+    } catch (error) {
+      console.error('[API] Error drawing raffle winners:', error);
+      res.status(500).json({ error: 'Erro ao realizar sorteio' });
+    }
+  });
+
+  // POST Confirm Raffle Winners
+  app.post('/api/admin/activation-products/:id/draw/confirm', authenticate, authorizeAdmin, async (req, res) => {
+    const { id } = req.params;
+
+    try {
+      const product = await prisma.activationProduct.findUnique({ where: { id } });
+      if (!product) return res.status(404).json({ error: 'Promoção não encontrada' });
+      if (!isRaffleLikeProduct(product)) {
+        return res.status(400).json({ error: 'Esta promoção não é um sorteio' });
+      }
+
+      const winners = await prisma.productActivation.findMany({
+        where: {
+          productId: id,
+          validationStatus: 'approved',
+          isWinner: true
+        },
+        orderBy: { drawnAt: 'asc' },
+        include: { product: true }
+      });
+
+      if (winners.length === 0) {
+        return res.status(400).json({ error: 'Nenhum ganhador sorteado para validar.' });
+      }
+
+      let notifiedCount = 0;
+      for (const winner of winners) {
+        const message = `Parabéns! Seu cupom ${winner.couponNumber || 'confirmado'} foi sorteado em ${winner.product.name}.`;
+        const existingNotification = await prisma.notification.findFirst({
+          where: {
+            userCpf: winner.userCpf,
+            title: 'Você foi sorteado!',
+            message
+          }
+        });
+
+        if (!existingNotification) {
+          await prisma.notification.create({
+            data: {
+              userCpf: winner.userCpf,
+              title: 'Você foi sorteado!',
+              message,
+              type: 'reward',
+              // @ts-ignore
+              actionUrl: '/rewards?tab=activations'
+            }
+          });
+
+          await sendPushNotification(
+            'Você foi sorteado!',
+            `Parabéns! Você ganhou no sorteio ${winner.product.name}.`,
+            winner.userCpf,
+            { type: 'raffle_winner', productId: winner.productId, participantId: winner.id }
+          );
+
+          notifiedCount += 1;
+        }
+      }
+
+      res.json({ product, winners, notifiedCount, confirmedAt: new Date() });
+    } catch (error) {
+      console.error('[API] Error confirming raffle winners:', error);
+      res.status(500).json({ error: 'Erro ao validar ganhadores do sorteio' });
+    }
+  });
+
   // POST Activate Product for User
   app.post('/api/activations', async (req, res) => {
-    const { productId, userCpf } = req.body;
-    const cleanCpf = userCpf.replace(/\D/g, '');
+    const { productId, userCpf, customerName, customerEmail, customerPhone } = req.body;
+    if (!productId || !userCpf) {
+      return res.status(400).json({ error: 'Produto e CPF são obrigatórios' });
+    }
+    const cleanCpf = String(userCpf).replace(/\D/g, '');
 
     try {
       const product = await prisma.activationProduct.findUnique({ 
@@ -1215,12 +1873,16 @@ async function startServer() {
         include: { activations: { where: { userCpf: cleanCpf } } }
       });
       if (!product) return res.status(404).json({ error: 'Produto não encontrado' });
+      const isRaffleProduct = isRaffleLikeProduct(product);
 
       const startOfMonth = new Date();
       startOfMonth.setDate(1);
       startOfMonth.setHours(0, 0, 0, 0);
 
       const userActivationsCount = product.activations.filter(a => {
+        if (isRaffleProduct && a.validationStatus === 'rejected') {
+          return false;
+        }
         // @ts-ignore
         if (product.isMonthly) {
           return new Date(a.activatedAt) >= startOfMonth;
@@ -1229,7 +1891,59 @@ async function startServer() {
       }).length;
 
       if (userActivationsCount >= product.limitPerCpf) {
-        return res.status(400).json({ error: 'Você já atingiu o limite de ativações para esta oferta.' });
+        return res.status(400).json({
+          error: isRaffleProduct
+            ? 'Você já atingiu o limite de participações para este sorteio.'
+            : 'Você já atingiu o limite de ativações para esta oferta.'
+        });
+      }
+
+      if (isRaffleProduct) {
+        const requiresPurchaseValidation = Boolean(product.minPurchaseValue && product.minPurchaseValue > 0);
+        const participant = await prisma.productActivation.create({
+          data: {
+            productId,
+            userCpf: cleanCpf,
+            customerName: customerName || null,
+            customerEmail: customerEmail || null,
+            customerPhone: customerPhone || null,
+            validUntil: product.expiresAt,
+            validationStatus: requiresPurchaseValidation ? 'pending' : 'approved',
+            couponNumber: requiresPurchaseValidation ? null : generateCouponNumber(),
+            validatedAt: requiresPurchaseValidation ? null : new Date()
+          },
+          include: { product: true }
+        });
+
+        const title = requiresPurchaseValidation ? 'Participação Recebida!' : 'Participação Confirmada!';
+        const message = requiresPurchaseValidation
+          ? `Para confirmar seu cupom no sorteio ${product.name}, pontue uma compra acima de ${formatCurrency(product.minPurchaseValue)} no Fidelimax. A validação será automática.`
+          : `Você já está participando do sorteio ${product.name}. Cupom: ${participant.couponNumber}.`;
+
+        await prisma.notification.create({
+          data: {
+            userCpf: cleanCpf,
+            title,
+            message,
+            type: 'reward',
+            // @ts-ignore
+            actionUrl: '/rewards?tab=activations'
+          }
+        });
+
+        await sendPushNotification(
+          title,
+          message,
+          cleanCpf,
+          {
+            type: requiresPurchaseValidation ? 'raffle_entry_pending' : 'raffle_entry_approved',
+            productId,
+            participantId: participant.id,
+            url: '/rewards?tab=activations'
+          }
+        );
+
+        return res.json(participant);
       }
 
       const validUntil = new Date(Date.now() + (product.redeemWindowHours * 60 * 60 * 1000));
@@ -1239,7 +1953,12 @@ async function startServer() {
       const activationRecords = Array.from({ length: limit }).map(() => ({
           productId,
           userCpf: cleanCpf,
-          validUntil
+          validUntil,
+          customerName: customerName || null,
+          customerEmail: customerEmail || null,
+          customerPhone: customerPhone || null,
+          validationStatus: 'approved',
+          validatedAt: new Date()
       }));
 
       await prisma.productActivation.createMany({
@@ -1409,6 +2128,16 @@ async function startServer() {
       if (payload.pontuacao) {
         title = '💰 Pontos Recebidos!';
         body = `Você ganhou ${payload.pontuacao} pontos! Seu novo saldo é ${payload.saldo}.`;
+        const purchaseAmount = payload.pontuacao_reais
+          ?? payload.valor_compra
+          ?? payload.valorCompra
+          ?? payload.valor
+          ?? payload.purchaseAmount
+          ?? payload.compra?.valor;
+
+        if (userCpf && purchaseAmount) {
+          await approvePendingRaffleEntriesForPurchase(userCpf, purchaseAmount, 'fidelimax_webhook');
+        }
       } else if (payload.premio) {
         title = '🎁 Resgate Realizado!';
         body = `Resgate de ${payload.premio} confirmado. Código: ${payload.voucher}`;

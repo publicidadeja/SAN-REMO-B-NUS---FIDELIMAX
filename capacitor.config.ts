@@ -1,9 +1,18 @@
+/// <reference types="@capacitor-firebase/messaging" />
+
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'sanremobonus.com',
+  appId: 'br.com.sanremobonus.app',
   appName: 'San Remo Bonus',
   webDir: 'dist',
+  includePlugins: [
+    '@capacitor-firebase/messaging',
+    '@capacitor/app',
+    '@capacitor/device',
+    '@capacitor/haptics',
+    '@capacitor/status-bar',
+  ],
   server: {
     url: 'https://app.sanremobonus.com',
     androidScheme: 'https',
@@ -35,7 +44,7 @@ const config: CapacitorConfig = {
       splashFullScreen: true,
       splashImmersive: true,
     },
-    PushNotifications: {
+    FirebaseMessaging: {
       presentationOptions: ['badge', 'sound', 'alert'],
     },
     App: {

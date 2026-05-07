@@ -113,23 +113,28 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   initSettings: async () => {
     try {
-      const [key, hours, contact] = await Promise.all([
-        FidelimaxApiService.getGlobalSetting('fidelimax_api_key'),
-        FidelimaxApiService.getGlobalSetting('story_expiration_hours'),
-        FidelimaxApiService.getGlobalSetting('help_center_contact')
-      ]);
+      const { user } = get();
+      const canReadAdminSettings = user?.role === 'admin' || user?.role === 'collaborator';
 
-      if (key) {
-        localStorage.setItem('@SanRemo:apiKey', key);
-        set({ apiKey: key });
-      }
-      if (hours) {
-        localStorage.setItem('@SanRemo:storyExpirationHours', hours);
-        set({ storyExpirationHours: parseInt(hours) });
-      }
-      if (contact) {
-        localStorage.setItem('@SanRemo:helpContact', contact);
-        set({ helpContact: contact });
+      if (canReadAdminSettings) {
+        const [key, hours, contact] = await Promise.all([
+          FidelimaxApiService.getGlobalSetting('fidelimax_api_key'),
+          FidelimaxApiService.getGlobalSetting('story_expiration_hours'),
+          FidelimaxApiService.getGlobalSetting('help_center_contact')
+        ]);
+
+        if (key) {
+          localStorage.setItem('@SanRemo:apiKey', key);
+          set({ apiKey: key });
+        }
+        if (hours) {
+          localStorage.setItem('@SanRemo:storyExpirationHours', hours);
+          set({ storyExpirationHours: parseInt(hours) });
+        }
+        if (contact) {
+          localStorage.setItem('@SanRemo:helpContact', contact);
+          set({ helpContact: contact });
+        }
       }
       
       const images = await FidelimaxApiService.getPamphletImages();
@@ -143,10 +148,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ isLoading: true, error: null });
     const { user, apiKey, storyExpirationHours } = get();
     const isConsumer = user?.role === 'user';
+    const canReadAdminSettings = user?.role === 'admin' || user?.role === 'collaborator';
     
     try {
       // Optimization: Only load settings if they are missing
-      if (!apiKey || !storyExpirationHours) {
+      if (canReadAdminSettings && (!apiKey || !storyExpirationHours)) {
         await get().initSettings();
       }
       
