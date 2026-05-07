@@ -1,30 +1,22 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { cn } from '../../utils/cn';
 import { useAppStore } from '../../store/useAppStore';
+import { type AdminPermission, userHasAnyPermission } from '../../utils/permissions';
 
 export function AdminLayout() {
   const location = useLocation();
   const { logout, user } = useAppStore();
+  const canUseDashboard = userHasAnyPermission(user, 'dashboard');
 
-  const userPermissions = user?.permissions?.split(',') || [];
-  const isAdmin = user?.role === 'admin';
-
-  const navItems = [
-    { icon: 'dashboard', label: 'Início', path: '/admin', id: 'dashboard' },
-    { icon: 'payments', label: 'Pontos', path: '/admin/points', id: 'points' },
-    { icon: 'amp_stories', label: 'Stories', path: '/admin/stories', id: 'stories' },
-    { icon: 'add_circle', label: 'Ofertas', path: '/admin/activations', id: 'activations' },
-    { icon: 'group', label: 'Equipe', path: '/admin/collaborators', id: 'team' },
-  ].filter(item => {
-    if (isAdmin) return true;
-    if (item.id === 'points') {
-      return userPermissions.includes('points') || 
-             userPermissions.includes('rewards') || 
-             userPermissions.includes('redeem_activations');
-    }
-    if (item.id === 'team') return false; // Admin only
-    return true;
-  });
+  const navItems = ([
+    { icon: 'dashboard', label: 'Início', path: '/admin', permissions: ['dashboard'] },
+    { icon: 'payments', label: 'Pontos', path: '/admin/points', permissions: ['points', 'rewards', 'redeem_activations'] },
+    { icon: 'amp_stories', label: 'Stories', path: '/admin/stories', permissions: ['stories'] },
+    { icon: 'add_circle', label: 'Promoções', path: '/admin/activations', permissions: ['activations'] },
+    ...(!canUseDashboard ? [{ icon: 'menu_book', label: 'Encarte', path: '/admin/pamphlets', permissions: ['pamphlets'] }] : []),
+    { icon: 'group', label: 'Equipe', path: '/admin/collaborators', permissions: ['team'] },
+  ] as Array<{ icon: string; label: string; path: string; permissions: AdminPermission[] }>)
+    .filter((item) => userHasAnyPermission(user, item.permissions));
 
   return (
     <div className="h-[100dvh] bg-surface-container-lowest flex justify-center overflow-hidden">
@@ -36,10 +28,12 @@ export function AdminLayout() {
           <div className="flex justify-between items-center px-6 h-16">
             <h1 className="font-bold text-lg text-on-surface">Painel Admin</h1>
             <div className="flex items-center gap-4">
-              <Link to="/admin/notifications" className="material-symbols-outlined text-secondary hover:text-primary transition-colors">
-                notifications
-              </Link>
-              {(user?.role === 'admin' || user?.permissions?.includes('settings')) && (
+              {userHasAnyPermission(user, 'notifications') && (
+                <Link to="/admin/notifications" className="material-symbols-outlined text-secondary hover:text-primary transition-colors">
+                  notifications
+                </Link>
+              )}
+              {userHasAnyPermission(user, 'settings') && (
                 <Link to="/admin/settings" className="material-symbols-outlined text-secondary hover:text-primary transition-colors">
                   settings
                 </Link>

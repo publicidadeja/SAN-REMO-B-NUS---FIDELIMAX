@@ -3,7 +3,7 @@ import { useAppStore } from '../store/useAppStore';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../utils/cn';
 import { Reward } from '../models/types';
-import { ShoppingBag, ChevronLeft, Star, Zap, ShoppingCart } from 'lucide-react';
+import { ShoppingBag, ChevronLeft, Star, Ticket, ShoppingCart } from 'lucide-react';
 import { ActivationList } from '../components/ActivationList';
 
 export function Rewards() {
@@ -115,8 +115,8 @@ export function Rewards() {
                 activeTab === 'activations' ? "bg-white text-primary shadow-sm" : "text-secondary"
               )}
             >
-              <Zap size={14} className={activeTab === 'activations' ? "fill-primary" : ""} />
-              ATIVAÇÕES
+              <Ticket size={14} className={activeTab === 'activations' ? "fill-primary" : ""} />
+              PROMOÇÕES
             </button>
           </div>
 

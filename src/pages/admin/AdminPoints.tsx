@@ -6,6 +6,26 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../../utils/cn';
 import { ConfirmModal } from '../../components/ConfirmModal';
 import { StatusModal } from '../../components/StatusModal';
+import { userHasAnyPermission } from '../../utils/permissions';
+
+const isRafflePromotion = (product: any) => {
+  const hintText = [
+    product?.name,
+    product?.description,
+    product?.prizeDescription,
+    product?.participationInstructions,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  return product?.promotionType === 'raffle'
+    || Boolean(product?.drawDate || product?.prizeDescription || Number(product?.minPurchaseValue || 0) > 0)
+    || ['sorteio', 'sortear', 'sortea', 'sorteado', 'sorteada', 'premio', 'premios', 'experiencias incriveis', 'cupom para participar', 'ganha 01 cupom', 'ganha 1 cupom']
+      .some((keyword) => hintText.includes(keyword));
+};
 
 export function AdminPoints() {
   const { collaborators, fetchCollaborators, addCollaborator, updateCollaborator, deleteCollaborator, user, isLoading } = useAppStore();
@@ -17,11 +37,9 @@ export function AdminPoints() {
   const [isLoadingCustomer, setIsLoadingCustomer] = useState(false);
   
   // Permissions Check
-  const permissions = user?.permissions?.split(',') || [];
-  const isAdmin = user?.role === 'admin';
-  const canPoints = isAdmin || permissions.includes('points');
-  const canRewards = isAdmin || permissions.includes('rewards');
-  const canRedeemActivations = isAdmin || permissions.includes('redeem_activations');
+  const canPoints = userHasAnyPermission(user, 'points');
+  const canRewards = userHasAnyPermission(user, 'rewards');
+  const canRedeemActivations = userHasAnyPermission(user, 'redeem_activations');
 
   const [activeTab, setActiveTab] = useState<'credit' | 'redeem'>(canPoints ? 'credit' : 'redeem');
   
@@ -48,8 +66,8 @@ export function AdminPoints() {
     const fetchData = async () => {
       try {
         const [rewardsList, activationsList] = await Promise.all([
-          FidelimaxApiService.getRewards(),
-          FidelimaxApiService.getActivationProducts()
+          canRewards ? FidelimaxApiService.getRewards() : Promise.resolve([]),
+          canRedeemActivations ? FidelimaxApiService.getActivationProducts() : Promise.resolve([])
         ]);
         setRewards(rewardsList);
         setActivationProducts(activationsList);
@@ -58,7 +76,7 @@ export function AdminPoints() {
       }
     };
     fetchData();
-  }, []);
+  }, [canRewards, canRedeemActivations]);
 
   const formatInput = (value: string) => {
     const numbers = value.replace(/\D/g, '');
@@ -78,6 +96,19 @@ export function AdminPoints() {
       .substring(0, 15);
   };
 
+  const formatPurchaseAmountInput = (value: string) => {
+    const cleaned = value.replace(/[^\d,.]/g, '');
+    const separatorIndex = cleaned.search(/[,.]/);
+
+    if (separatorIndex === -1) return cleaned;
+
+    const integerPart = cleaned.slice(0, separatorIndex);
+    const separator = cleaned[separatorIndex];
+    const decimalPart = cleaned.slice(separatorIndex + 1).replace(/[,.]/g, '').slice(0, 2);
+
+    return `${integerPart}${separator}${decimalPart}`;
+  };
+
   const handleInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     const formatted = formatInput(e.target.value);
     setQuery(formatted);
@@ -86,6 +117,8 @@ export function AdminPoints() {
   const filteredRewards = rewards.filter(r => 
     r.name.toLowerCase().includes(rewardSearch.toLowerCase())
   );
+  const offerProducts = activationProducts.filter((product) => !isRafflePromotion(product));
+  const raffleProducts = activationProducts.filter(isRafflePromotion);
 
   const handleSearch = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -122,13 +155,27 @@ export function AdminPoints() {
     
     setIsCrediting(true);
     try {
-      const success = await FidelimaxApiService.creditPoints(customer.cpf, parseFloat(pointsAmount));
-      if (success) {
+      const purchaseAmount = parseFloat(pointsAmount.replace(',', '.'));
+      if (!Number.isFinite(purchaseAmount) || purchaseAmount <= 0) {
+        setNotification({
+          show: true,
+          type: 'error',
+          title: 'Valor inválido',
+          message: 'Informe um valor de compra válido para pontuar.'
+        });
+        return;
+      }
+
+      const result = await FidelimaxApiService.creditPoints(customer.cpf, purchaseAmount);
+      if (result.success) {
+        const approvedEntries = result.autoApprovedRaffleEntries || [];
         setNotification({
           show: true,
           type: 'success',
           title: 'Pontuação Realizada',
-          message: `R$ ${pointsAmount} em compras foram convertidos em pontos para ${customer.nome}.`
+          message: approvedEntries.length > 0
+            ? `R$ ${pointsAmount} em compras foram convertidos em pontos para ${customer.nome}. ${approvedEntries.length} cupom(ns) de sorteio foram confirmados automaticamente.`
+            : `R$ ${pointsAmount} em compras foram convertidos em pontos para ${customer.nome}.`
         });
         setPointsAmount('');
         // Refresh customer data
@@ -188,7 +235,7 @@ export function AdminPoints() {
       setNotification({
         show: true,
         type: 'success',
-        title: 'Ativação Resgatada',
+        title: 'Oferta Entregue',
         message: `${redeemQty} unidade(s) de "${selectedActivationGroup.productName}" foram marcadas como entregues.`
       });
       setSelectedActivationGroup(null);
@@ -200,7 +247,7 @@ export function AdminPoints() {
         show: true,
         type: 'error',
         title: 'Erro no Resgate',
-        message: 'Não foi possível processar o resgate da ativação.'
+        message: 'Não foi possível processar o resgate da oferta.'
       });
     } finally {
       setIsRedeeming(false);
@@ -216,12 +263,14 @@ export function AdminPoints() {
         <form onSubmit={handleSearch} className="flex gap-2">
           <div className="relative flex-1">
             <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-stone-400">search</span>
-            <input 
-              type="text" 
+            <input
+              type="tel"
+              inputMode="numeric"
+              enterKeyHint="search"
               placeholder="CPF ou Telefone..."
               value={query}
               onChange={handleInputChange}
-              className="w-full pl-10 pr-4 py-3 bg-surface-container-lowest border-2 border-surface-container-high rounded-xl text-sm font-bold focus:border-primary outline-none transition-all"
+              className="w-full pl-10 pr-4 py-3 bg-surface-container-lowest border-2 border-surface-container-high rounded-xl text-base font-bold focus:border-primary outline-none transition-all"
             />
           </div>
             <button 
@@ -282,14 +331,16 @@ export function AdminPoints() {
                   <div>
                     <label className="block text-[10px] font-black text-stone-400 uppercase tracking-widest mb-2 px-1">Valor da Compra (R$)</label>
                     <input 
-                      type="number" 
+                      type="text"
+                      inputMode="decimal"
+                      enterKeyHint="done"
                       placeholder="0,00"
                       value={pointsAmount}
-                      onChange={(e) => setPointsAmount(e.target.value)}
+                      onChange={(e) => setPointsAmount(formatPurchaseAmountInput(e.target.value))}
                       className="w-full bg-surface-container-lowest border-2 border-surface-container-high rounded-xl py-4 px-4 text-xl font-black focus:border-primary outline-none transition-all"
                     />
                     <p className="mt-2 text-[10px] text-secondary/60 italic px-1">
-                      O valor será convertido automaticamente em pontos seguindo as regras do Fidelimax.
+                      O valor será convertido automaticamente em pontos seguindo as regras do programa.
                     </p>
                   </div>
                   <button 
@@ -302,19 +353,23 @@ export function AdminPoints() {
                 </div>
               ) : (
                 <div className="space-y-6">
-                  {/* APP Activations Section */}
+                  {/* APP Offers Section */}
                   {canRedeemActivations && (
                     <div>
                       <h4 className="text-[10px] font-black text-stone-400 uppercase tracking-widest mb-1 px-1 flex items-center gap-2">
                         <span className="material-symbols-outlined text-sm">bolt</span>
-                        Ativações do App (Ofertas)
+                        Ofertas do App
                       </h4>
                       <p className="text-[9px] text-stone-400 italic mb-3 px-1">
-                        O cliente deve ativar a oferta no aplicativo antes do resgate ser liberado aqui.
+                        O cliente deve garantir a oferta no aplicativo antes do resgate ser liberado aqui.
                       </p>
 
                       <div className="space-y-2">
-                        {activationProducts.map((product, idx) => {
+                        {offerProducts.length === 0 ? (
+                          <p className="text-center py-6 text-stone-400 font-bold text-xs italic bg-stone-50 rounded-xl border border-stone-100">
+                            Nenhuma oferta do app disponível para resgate.
+                          </p>
+                        ) : offerProducts.map((product, idx) => {
                           const userActivations = (customer.activations || []).filter((a: any) => a.productId === product.id);
                           const count = userActivations.length;
                           const isActivated = count > 0;
@@ -354,7 +409,7 @@ export function AdminPoints() {
                                     ) : (
                                       <span className="text-[9px] font-black text-error uppercase tracking-widest flex items-center gap-1">
                                         <span className="material-symbols-outlined text-[10px]">warning</span>
-                                        PENDENTE: ATIVAR NO APP
+                                        PENDENTE: GARANTIR NO APP
                                       </span>
                                     )}
                                   </div>
@@ -381,6 +436,74 @@ export function AdminPoints() {
                               >
                                 Baixar
                               </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {canRedeemActivations && raffleProducts.length > 0 && (
+                    <div>
+                      <h4 className="text-[10px] font-black text-stone-400 uppercase tracking-widest mb-1 px-1 flex items-center gap-2">
+                        <span className="material-symbols-outlined text-sm">local_activity</span>
+                        Sorteios do App
+                      </h4>
+                      <p className="text-[9px] text-stone-400 italic mb-3 px-1">
+                        A pontuação do app confirma automaticamente o cupom quando atingir o valor mínimo do sorteio.
+                      </p>
+
+                      <div className="space-y-2">
+                        {raffleProducts.map((product, idx) => {
+                          const userEntries = (customer.activations || []).filter((a: any) => a.productId === product.id && a.validationStatus !== 'rejected');
+                          const approvedEntries = userEntries.filter((entry: any) => entry.validationStatus === 'approved');
+                          const pendingEntries = userEntries.filter((entry: any) => entry.validationStatus === 'pending');
+                          const hasEntries = userEntries.length > 0;
+
+                          return (
+                            <div
+                              key={product.id || `raffle-prod-${idx}`}
+                              className={cn(
+                                "flex items-center justify-between p-3 rounded-xl border transition-all",
+                                hasEntries
+                                  ? "bg-stone-950 text-white border-stone-800 shadow-lg shadow-stone-900/10"
+                                  : "bg-white text-stone-400 border-stone-100 opacity-70"
+                              )}
+                            >
+                              <div className="flex items-center gap-3 min-w-0">
+                                <div className={cn(
+                                  "w-10 h-10 rounded-lg flex items-center justify-center overflow-hidden shrink-0",
+                                  hasEntries ? "bg-white/10 text-primary" : "bg-stone-100"
+                                )}>
+                                  {product.imageUrl ? (
+                                    <img src={product.imageUrl} alt={product.name} className="w-full h-full object-cover" />
+                                  ) : (
+                                    <span className="material-symbols-outlined opacity-70 text-sm">confirmation_number</span>
+                                  )}
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <h5 className={cn("text-xs font-bold truncate max-w-[140px]", hasEntries ? "text-white" : "text-stone-600")}>
+                                      {product.name}
+                                    </h5>
+                                    <span className="shrink-0 text-[8px] bg-primary text-on-primary px-1.5 rounded-md font-black uppercase tracking-widest">
+                                      Sorteio
+                                    </span>
+                                  </div>
+                                  <p className={cn("text-[9px] font-bold mt-1", hasEntries ? "text-white/50" : "text-stone-400")}>
+                                    {hasEntries
+                                      ? `${approvedEntries.length} cupom(ns) confirmado(s) • ${pendingEntries.length} pendente(s)`
+                                      : 'Cliente ainda não participou pelo app'}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <span className={cn(
+                                "px-3 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest",
+                                hasEntries ? "bg-white/10 text-primary" : "bg-stone-100 text-stone-300"
+                              )}>
+                                Ver em Promoções
+                              </span>
                             </div>
                           );
                         })}
@@ -469,7 +592,7 @@ export function AdminPoints() {
           setRedeemQty(1);
         }}
         onConfirm={selectedActivationGroup ? handleRedeemActivation : handleRedeemReward}
-        title={selectedActivationGroup ? "Confirmar Resgate de Ativação" : "Confirmar Resgate"}
+        title={selectedActivationGroup ? "Confirmar Entrega da Oferta" : "Confirmar Resgate"}
         message={
           <div>
             {selectedActivationGroup ? (

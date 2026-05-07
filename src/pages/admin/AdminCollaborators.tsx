@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useAppStore } from '../../store/useAppStore';
 import { motion, AnimatePresence } from 'motion/react';
 import { ConfirmModal } from '../../components/ConfirmModal';
+import { PERMISSION_LABELS, parsePermissionList, userHasAnyPermission } from '../../utils/permissions';
 
 export function AdminCollaborators() {
   const { collaborators, fetchCollaborators, addCollaborator, updateCollaborator, deleteCollaborator, user, isLoading } = useAppStore();
@@ -15,12 +16,14 @@ export function AdminCollaborators() {
   const PERMISSIONS_OPTIONS = [
     { id: 'dashboard', label: 'Dashboard' },
     { id: 'stories', label: 'Stories' },
-    { id: 'activations', label: 'Cadastro de Ofertas (Ativações)' },
+    { id: 'activations', label: 'Cadastro de Ofertas e Sorteios' },
     { id: 'redeem_activations', label: 'Resgate de Ofertas (App)' },
     { id: 'points', label: 'Lançar Pontos (Fidelimax)' },
     { id: 'rewards', label: 'Resgate de Prêmios (Fidelimax)' },
     { id: 'team', label: 'Equipe' },
     { id: 'settings', label: 'Configurações' },
+    { id: 'notifications', label: 'Notificações' },
+    { id: 'pamphlets', label: 'Encarte' },
   ];
 
   useEffect(() => {
@@ -61,7 +64,7 @@ export function AdminCollaborators() {
       password: '', // Não mostrar senha atual por segurança
       role: collab.role
     });
-    setSelectedPermissions(collab.permissions ? collab.permissions.split(',') : []);
+    setSelectedPermissions(parsePermissionList(collab.permissions));
     setShowAddForm(true);
   };
 
@@ -75,12 +78,12 @@ export function AdminCollaborators() {
     }
   };
 
-  if (user?.role !== 'admin') {
+  if (!userHasAnyPermission(user, 'team')) {
     return (
       <div className="p-10 text-center">
         <span className="material-symbols-outlined text-error text-5xl mb-4">gpp_maybe</span>
         <h2 className="text-xl font-bold text-on-surface">Acesso Negado</h2>
-        <p className="text-secondary">Apenas administradores podem gerenciar acessos.</p>
+        <p className="text-secondary">Seu usuário não possui permissão para gerenciar acessos.</p>
       </div>
     );
   }
@@ -134,9 +137,9 @@ export function AdminCollaborators() {
               <p className="text-xs text-secondary truncate">{collab.email}</p>
               {collab.role !== 'admin' && collab.permissions && (
                 <div className="flex flex-wrap gap-1 mt-1.5 text-on-primary">
-                  {collab.permissions.split(',').map((p: string) => (
+                  {parsePermissionList(collab.permissions).map((p) => (
                     <span key={p} className="text-[9px] bg-primary text-on-primary px-1.5 py-0.5 rounded-full uppercase font-black tracking-tighter">
-                      {p}
+                      {PERMISSION_LABELS[p]}
                     </span>
                   ))}
                 </div>

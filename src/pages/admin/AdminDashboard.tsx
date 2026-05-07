@@ -3,15 +3,14 @@ import { useAppStore } from '../../store/useAppStore';
 import { motion } from 'motion/react';
 import { Link } from 'react-router-dom';
 import { cn } from '../../utils/cn';
+import { userHasAnyPermission } from '../../utils/permissions';
 
 export function AdminDashboard() {
   const { 
     user, 
     stories, 
-    collaborators, 
     apiKey,
     fetchStories, 
-    fetchCollaborators, 
     fetchDashboardData,
     fetchActivationProducts,
     fetchAdminMetrics,
@@ -22,11 +21,22 @@ export function AdminDashboard() {
 
   useEffect(() => {
     fetchStories();
-    fetchCollaborators();
     fetchActivationProducts();
     fetchAdminMetrics();
     fetchDashboardData().catch(() => {});
-  }, [fetchStories, fetchCollaborators, fetchDashboardData, fetchActivationProducts, fetchAdminMetrics]);
+  }, [fetchStories, fetchDashboardData, fetchActivationProducts, fetchAdminMetrics]);
+
+  const canUsePointsPanel = userHasAnyPermission(user, ['points', 'rewards', 'redeem_activations']);
+  const canManageNotifications = userHasAnyPermission(user, 'notifications');
+  const canManageActivations = userHasAnyPermission(user, 'activations');
+  const canManagePamphlets = userHasAnyPermission(user, 'pamphlets');
+  const canManageSettings = userHasAnyPermission(user, 'settings');
+
+  const metricCards = [
+    { label: 'Promoções', val: activationProducts.length, icon: 'local_offer' },
+    { label: 'Stories', val: stories.length, icon: 'amp_stories' },
+    ...(canManageSettings ? [{ label: 'API', val: apiKey ? 'ATIVO' : 'AVISO', icon: apiKey ? 'check_circle' : 'warning', color: apiKey ? 'text-green-500' : 'text-error' }] : []),
+  ];
 
   if (isLoading) {
     return (
@@ -103,11 +113,7 @@ export function AdminDashboard() {
 
       {/* Secondary Metrics Row */}
       <section className="grid grid-cols-3 gap-3">
-        {[
-          { label: 'Ofertas', val: activationProducts.length, icon: 'local_offer' },
-          { label: 'Stories', val: stories.length, icon: 'amp_stories' },
-          { label: 'API', val: apiKey ? 'ATIVO' : 'AVISO', icon: apiKey ? 'check_circle' : 'warning', color: apiKey ? 'text-green-500' : 'text-error' }
-        ].map((item, idx) => (
+        {metricCards.map((item, idx) => (
           <motion.div 
             key={item.label}
             initial={{ opacity: 0, scale: 0.9 }}
@@ -130,45 +136,53 @@ export function AdminDashboard() {
         </div>
 
         <div className="grid grid-cols-2 gap-3">
-          <Link to="/admin/points" className="col-span-2 bg-surface-container-low border border-outline-variant/5 rounded-3xl p-6 flex items-center justify-between group active:scale-[0.99] transition-all">
-            <div className="flex items-center gap-4">
-              <div className="w-14 h-14 rounded-2xl bg-primary flex items-center justify-center text-on-primary shadow-lg shadow-primary/20 rotate-3 group-hover:rotate-0 transition-transform">
-                <span className="material-symbols-outlined text-[28px]">payments</span>
+          {canUsePointsPanel && (
+            <Link to="/admin/points" className="col-span-2 bg-surface-container-low border border-outline-variant/5 rounded-3xl p-6 flex items-center justify-between group active:scale-[0.99] transition-all">
+              <div className="flex items-center gap-4">
+                <div className="w-14 h-14 rounded-2xl bg-primary flex items-center justify-center text-on-primary shadow-lg shadow-primary/20 rotate-3 group-hover:rotate-0 transition-transform">
+                  <span className="material-symbols-outlined text-[28px]">payments</span>
+                </div>
+                <div>
+                  <h5 className="font-black text-on-surface text-lg leading-tight uppercase tracking-tight">Gerenciar Pontos</h5>
+                  <p className="text-secondary text-[10px] font-medium uppercase tracking-widest">Atendimento Direto</p>
+                </div>
               </div>
+              <span className="material-symbols-outlined text-stone-300 group-hover:text-primary group-hover:translate-x-1 transition-all">arrow_forward_ios</span>
+            </Link>
+          )}
+
+          {canManageNotifications && (
+            <Link to="/admin/notifications" className="bg-surface-container-low border border-outline-variant/5 rounded-3xl p-6 flex flex-col gap-4 active:scale-[0.98] transition-all group overflow-hidden relative">
+              <div className="absolute -right-4 -bottom-4 opacity-5 group-hover:scale-110 transition-transform">
+                <span className="material-symbols-outlined text-[80px]">campaign</span>
+              </div>
+              <span className="material-symbols-outlined text-secondary text-2xl group-hover:text-primary transition-colors">notifications</span>
               <div>
-                <h5 className="font-black text-on-surface text-lg leading-tight uppercase tracking-tight">Gerenciar Pontos</h5>
-                <p className="text-secondary text-[10px] font-medium uppercase tracking-widest">Atendimento Direto</p>
+                <h5 className="font-black text-on-surface text-sm uppercase tracking-tighter leading-none mb-1">Notificar</h5>
+                <p className="text-[9px] text-stone-400 font-bold uppercase tracking-widest">Push & App</p>
               </div>
-            </div>
-            <span className="material-symbols-outlined text-stone-300 group-hover:text-primary group-hover:translate-x-1 transition-all">arrow_forward_ios</span>
-          </Link>
+            </Link>
+          )}
 
-          <Link to="/admin/notifications" className="bg-surface-container-low border border-outline-variant/5 rounded-3xl p-6 flex flex-col gap-4 active:scale-[0.98] transition-all group overflow-hidden relative">
-            <div className="absolute -right-4 -bottom-4 opacity-5 group-hover:scale-110 transition-transform">
-              <span className="material-symbols-outlined text-[80px]">campaign</span>
-            </div>
-            <span className="material-symbols-outlined text-secondary text-2xl group-hover:text-primary transition-colors">notifications</span>
-            <div>
-              <h5 className="font-black text-on-surface text-sm uppercase tracking-tighter leading-none mb-1">Notificar</h5>
-              <p className="text-[9px] text-stone-400 font-bold uppercase tracking-widest">Push & App</p>
-            </div>
-          </Link>
+          {canManageActivations && (
+            <Link to="/admin/activations" className="bg-surface-container-low border border-outline-variant/5 rounded-3xl p-6 flex flex-col gap-4 active:scale-[0.98] transition-all group overflow-hidden relative">
+               <div className="absolute -right-4 -bottom-4 opacity-5 group-hover:scale-110 transition-transform">
+                <span className="material-symbols-outlined text-[80px]">add_circle</span>
+              </div>
+              <span className="material-symbols-outlined text-secondary text-2xl group-hover:text-primary transition-colors">verified</span>
+              <div>
+                <h5 className="font-black text-on-surface text-sm uppercase tracking-tighter leading-none mb-1">Promoções</h5>
+                <p className="text-[9px] text-stone-400 font-bold uppercase tracking-widest">Ofertas e Sorteios</p>
+              </div>
+            </Link>
+          )}
 
-          <Link to="/admin/activations" className="bg-surface-container-low border border-outline-variant/5 rounded-3xl p-6 flex flex-col gap-4 active:scale-[0.98] transition-all group overflow-hidden relative">
-             <div className="absolute -right-4 -bottom-4 opacity-5 group-hover:scale-110 transition-transform">
-              <span className="material-symbols-outlined text-[80px]">add_circle</span>
-            </div>
-            <span className="material-symbols-outlined text-secondary text-2xl group-hover:text-primary transition-colors">verified</span>
-            <div>
-              <h5 className="font-black text-on-surface text-sm uppercase tracking-tighter leading-none mb-1">Ofertas</h5>
-              <p className="text-[9px] text-stone-400 font-bold uppercase tracking-widest">Criar Ativação</p>
-            </div>
-          </Link>
-
-          <Link to="/admin/pamphlets" className="col-span-2 bg-on-surface text-surface py-5 px-8 rounded-full flex items-center justify-center gap-3 active:scale-[0.98] transition-transform shadow-xl shadow-stone-900/10">
-            <span className="material-symbols-outlined text-[20px] text-primary">menu_book</span>
-            <span className="text-xs font-black uppercase tracking-[0.2em]">Gerenciar Encarte Semanal</span>
-          </Link>
+          {canManagePamphlets && (
+            <Link to="/admin/pamphlets" className="col-span-2 bg-on-surface text-surface py-5 px-8 rounded-full flex items-center justify-center gap-3 active:scale-[0.98] transition-transform shadow-xl shadow-stone-900/10">
+              <span className="material-symbols-outlined text-[20px] text-primary">menu_book</span>
+              <span className="text-xs font-black uppercase tracking-[0.2em]">Gerenciar Encarte Semanal</span>
+            </Link>
+          )}
         </div>
       </section>
 

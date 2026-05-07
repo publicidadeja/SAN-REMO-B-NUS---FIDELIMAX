@@ -57,6 +57,11 @@ model ActivationProduct {
   imageUrl          String?
   originalPrice     Float
   promotionalPrice  Float
+  promotionType     String              @default("offer")
+  prizeDescription  String?
+  minPurchaseValue  Float?
+  participationInstructions String?
+  drawDate          DateTime?
   limitPerCpf       Int                 @default(1)
   redeemWindowHours Int                 @default(24)
   expiresAt         DateTime
@@ -76,7 +81,19 @@ model ProductActivation {
   activatedAt DateTime          @default(now())
   redeemedAt  DateTime?
   validUntil  DateTime
+  validationStatus String        @default("approved")
+  purchaseAmount   Float?
+  customerName     String?
+  customerEmail    String?
+  customerPhone    String?
+  couponNumber     String?
+  validatedAt      DateTime?
+  isWinner         Boolean       @default(false)
+  drawnAt          DateTime?
   product     ActivationProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, validationStatus])
+  @@index([productId, isWinner])
 }
 
 model PamphletImage {

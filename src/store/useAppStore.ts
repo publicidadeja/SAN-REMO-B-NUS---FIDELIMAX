@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { User, Balance, Reward, Transaction, Story, AppNotification } from '../models/types';
 import { FidelimaxApiService } from '../api/fidelimax';
+import { userHasAnyPermission } from '../utils/permissions';
 
 interface AppState {
   user: User | null;
@@ -99,7 +100,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const { user, token } = await FidelimaxApiService.login(cpf);
       localStorage.setItem('@SanRemo:token', token);
       localStorage.setItem('@SanRemo:user', JSON.stringify(user));
-      set({ user, token, isLoading: false });
+      localStorage.removeItem('@SanRemo:apiKey');
+      set({ user, token, apiKey: '', isLoading: false });
     } catch (error) {
       set({ error: 'Falha ao fazer login', isLoading: false });
     }
@@ -108,15 +110,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   logout: () => {
     localStorage.removeItem('@SanRemo:token');
     localStorage.removeItem('@SanRemo:user');
-    set({ user: null, token: null, balance: null, rewards: [], transactions: [], stories: [], notifications: [] });
+    localStorage.removeItem('@SanRemo:apiKey');
+    set({ user: null, token: null, apiKey: '', balance: null, rewards: [], transactions: [], stories: [], notifications: [] });
   },
 
   initSettings: async () => {
     try {
       const { user } = get();
-      const canReadAdminSettings = user?.role === 'admin' || user?.role === 'collaborator';
+      const canReadSettings = userHasAnyPermission(user, 'settings');
+      const canReadStorySettings = userHasAnyPermission(user, ['settings', 'stories']);
 
-      if (canReadAdminSettings) {
+      if (canReadSettings) {
         const [key, hours, contact] = await Promise.all([
           FidelimaxApiService.getGlobalSetting('fidelimax_api_key'),
           FidelimaxApiService.getGlobalSetting('story_expiration_hours'),
@@ -135,6 +139,12 @@ export const useAppStore = create<AppState>((set, get) => ({
           localStorage.setItem('@SanRemo:helpContact', contact);
           set({ helpContact: contact });
         }
+      } else if (canReadStorySettings) {
+        const hours = await FidelimaxApiService.getGlobalSetting('story_expiration_hours');
+        if (hours) {
+          localStorage.setItem('@SanRemo:storyExpirationHours', hours);
+          set({ storyExpirationHours: parseInt(hours) });
+        }
       }
       
       const images = await FidelimaxApiService.getPamphletImages();
@@ -148,11 +158,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ isLoading: true, error: null });
     const { user, apiKey, storyExpirationHours } = get();
     const isConsumer = user?.role === 'user';
-    const canReadAdminSettings = user?.role === 'admin' || user?.role === 'collaborator';
+    const canReadSettings = userHasAnyPermission(user, 'settings');
+    const canReadStorySettings = userHasAnyPermission(user, ['settings', 'stories']);
+    const canReadStories = isConsumer || userHasAnyPermission(user, ['dashboard', 'stories']);
+    const canReadRewards = isConsumer || userHasAnyPermission(user, 'rewards');
+    const canReadPamphlets = isConsumer || userHasAnyPermission(user, ['dashboard', 'pamphlets']);
     
     try {
       // Optimization: Only load settings if they are missing
-      if (canReadAdminSettings && (!apiKey || !storyExpirationHours)) {
+      if ((canReadSettings && (!apiKey || !storyExpirationHours)) || (canReadStorySettings && !storyExpirationHours)) {
         await get().initSettings();
       }
       
@@ -162,30 +176,30 @@ export const useAppStore = create<AppState>((set, get) => ({
           return null;
         }) : Promise.resolve(null),
         
-        FidelimaxApiService.getRewards().catch(e => {
+        canReadRewards ? FidelimaxApiService.getRewards().catch(e => {
           console.error('[AppStore] Rewards fetch failed:', e);
           return [];
-        }),
+        }) : Promise.resolve([]),
         
         isConsumer ? FidelimaxApiService.getTransactions(user?.cpf).catch(e => {
           console.error('[AppStore] Transactions fetch failed:', e);
           return [];
         }) : Promise.resolve([]),
         
-        FidelimaxApiService.getStories().catch(e => {
+        canReadStories ? FidelimaxApiService.getStories().catch(e => {
           console.error('[AppStore] Stories fetch failed:', e);
           return [];
-        }),
+        }) : Promise.resolve([]),
         
         isConsumer ? FidelimaxApiService.getNotifications(user?.cpf || '').catch(e => {
           console.error('[AppStore] Notifications fetch failed:', e);
           return [];
         }) : Promise.resolve([]),
 
-        FidelimaxApiService.getPamphletImages().catch(e => {
+        canReadPamphlets ? FidelimaxApiService.getPamphletImages().catch(e => {
           console.error('[AppStore] Pamphlet fetch failed:', e);
           return [];
-        })
+        }) : Promise.resolve([])
       ]);
 
       set({ balance, rewards, transactions, stories, notifications, pamphletImages, isLoading: false });
@@ -352,7 +366,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       const { user, token } = await FidelimaxApiService.adminLogin(data);
       localStorage.setItem('@SanRemo:token', token);
       localStorage.setItem('@SanRemo:user', JSON.stringify(user));
-      set({ user, token, isLoading: false });
+      if (!userHasAnyPermission(user, 'settings')) {
+        localStorage.removeItem('@SanRemo:apiKey');
+      }
+      set({ user, token, apiKey: userHasAnyPermission(user, 'settings') ? get().apiKey : '', isLoading: false });
     } catch (error: any) {
       set({ error: 'Credenciais administrativas inválidas', isLoading: false });
       throw error;
@@ -427,7 +444,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     try {
-      await FidelimaxApiService.activateProduct(productId, user.cpf);
+      await FidelimaxApiService.activateProduct(productId, user.cpf, {
+        name: user.name,
+        email: user.email,
+        phone: user.phone
+      });
       await Promise.all([
         get().fetchActivationProducts(),
         get().fetchMyActivations(),
@@ -435,7 +456,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       ]);
       set({ isLoading: false });
     } catch (error: any) {
-      set({ error: error.response?.data?.error || 'Erro ao ativar oferta', isLoading: false });
+      set({ error: error.response?.data?.error || 'Erro ao processar promoção', isLoading: false });
       throw error;
     }
   },

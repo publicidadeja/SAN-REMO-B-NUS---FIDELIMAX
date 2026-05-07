@@ -1,5 +1,5 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { useEffect } from 'react';
+import { type ReactNode, useEffect } from 'react';
 import { useAppStore } from './store/useAppStore';
 import { Home } from './pages/Home';
 import { Login } from './pages/Login';
@@ -24,6 +24,28 @@ import { AdminPoints } from './pages/admin/AdminPoints';
 import { AdminPamphlets } from './pages/admin/AdminPamphlets';
 import { AdminNotifications } from './pages/admin/AdminNotifications';
 import { useNativePush } from './hooks/useNativePush';
+import { type AdminPermission, getFirstAccessibleAdminPath, userHasAnyPermission } from './utils/permissions';
+
+function AdminAccessDenied() {
+  return (
+    <div className="p-10 text-center">
+      <span className="material-symbols-outlined text-error text-5xl mb-4">gpp_maybe</span>
+      <h2 className="text-xl font-bold text-on-surface">Acesso Negado</h2>
+      <p className="text-secondary">Seu usuário não possui permissão para esta área.</p>
+    </div>
+  );
+}
+
+function AdminPermissionRoute({ permissions, children }: { permissions: AdminPermission | AdminPermission[]; children: ReactNode }) {
+  const { user } = useAppStore();
+  const fallbackPath = getFirstAccessibleAdminPath(user);
+
+  if (userHasAnyPermission(user, permissions)) {
+    return <>{children}</>;
+  }
+
+  return fallbackPath ? <Navigate to={fallbackPath} replace /> : <AdminAccessDenied />;
+}
 
 export default function App() {
   const { token, user, fetchDashboardData } = useAppStore();
@@ -40,7 +62,9 @@ export default function App() {
   // Redirect logic based on role
   const getInitialRoute = () => {
     if (!token) return '/login';
-    if (user?.role === 'admin' || user?.role === 'collaborator') return '/admin';
+    if (user?.role === 'admin' || user?.role === 'collaborator') {
+      return getFirstAccessibleAdminPath(user) || '/admin/no-access';
+    }
     return '/';
   };
 
@@ -64,14 +88,15 @@ export default function App() {
 
         {/* Admin Routes - For both admin and collaborator */}
         <Route element={token && (user?.role === 'admin' || user?.role === 'collaborator') ? <AdminLayout /> : <Navigate to={getInitialRoute()} />}>
-          <Route path="/admin" element={<AdminDashboard />} />
-          <Route path="/admin/pamphlets" element={<AdminPamphlets />} />
-          <Route path="/admin/points" element={<AdminPoints />} />
-          <Route path="/admin/settings" element={<AdminSettings />} />
-          <Route path="/admin/stories" element={<AdminStories />} />
-          <Route path="/admin/collaborators" element={<AdminCollaborators />} />
-          <Route path="/admin/activations" element={<AdminActivationProducts />} />
-          <Route path="/admin/notifications" element={<AdminNotifications />} />
+          <Route path="/admin" element={<AdminPermissionRoute permissions="dashboard"><AdminDashboard /></AdminPermissionRoute>} />
+          <Route path="/admin/pamphlets" element={<AdminPermissionRoute permissions="pamphlets"><AdminPamphlets /></AdminPermissionRoute>} />
+          <Route path="/admin/points" element={<AdminPermissionRoute permissions={['points', 'rewards', 'redeem_activations']}><AdminPoints /></AdminPermissionRoute>} />
+          <Route path="/admin/settings" element={<AdminPermissionRoute permissions="settings"><AdminSettings /></AdminPermissionRoute>} />
+          <Route path="/admin/stories" element={<AdminPermissionRoute permissions="stories"><AdminStories /></AdminPermissionRoute>} />
+          <Route path="/admin/collaborators" element={<AdminPermissionRoute permissions="team"><AdminCollaborators /></AdminPermissionRoute>} />
+          <Route path="/admin/activations" element={<AdminPermissionRoute permissions="activations"><AdminActivationProducts /></AdminPermissionRoute>} />
+          <Route path="/admin/notifications" element={<AdminPermissionRoute permissions="notifications"><AdminNotifications /></AdminPermissionRoute>} />
+          <Route path="/admin/no-access" element={<AdminAccessDenied />} />
         </Route>
       </Routes>
     </Router>

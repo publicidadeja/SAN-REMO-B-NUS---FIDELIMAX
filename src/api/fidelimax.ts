@@ -148,16 +148,17 @@ export const FidelimaxApiService = {
     }
   }) => {
     const cleanCpf = data.cpf.replace(/\D/g, '');
-    const response = await FidelimaxAPI.cadastrarConsumidor({
+    const response = await api.post('/api/auth/register-consumer', {
       ...data,
       cpf: cleanCpf
     });
+    const result = response.data;
 
-    if (response && response.CodigoResposta === 100) {
-      return response;
+    if (result && result.CodigoResposta === 100) {
+      return result;
     }
 
-    throw new Error(response?.MensagemErro || response?.Mensagem || 'Falha ao realizar cadastro');
+    throw new Error(result?.MensagemErro || result?.Mensagem || 'Falha ao realizar cadastro');
   },
 
   getStories: async (): Promise<Story[]> => {
@@ -393,8 +394,14 @@ export const FidelimaxApiService = {
     return true;
   },
 
-  activateProduct: async (productId: string, userCpf: string): Promise<any> => {
-    const response = await api.post(`/api/activations`, { productId, userCpf });
+  activateProduct: async (productId: string, userCpf: string, customer?: { name?: string; email?: string; phone?: string }): Promise<any> => {
+    const response = await api.post(`/api/activations`, {
+      productId,
+      userCpf,
+      customerName: customer?.name,
+      customerEmail: customer?.email,
+      customerPhone: customer?.phone
+    });
     return response.data;
   },
 
@@ -477,10 +484,13 @@ export const FidelimaxApiService = {
     return null;
   },
 
-  creditPoints: async (cpf: string, amount: number): Promise<boolean> => {
+  creditPoints: async (cpf: string, amount: number): Promise<{ success: boolean; autoApprovedRaffleEntries: any[] }> => {
     const cleanCpf = cpf.replace(/\D/g, '');
     const response = await FidelimaxAPI.pontuarConsumidor({ cpf: cleanCpf, pontuacao_reais: amount });
-    return response && response.CodigoResposta === 100;
+    return {
+      success: Boolean(response && response.CodigoResposta === 100),
+      autoApprovedRaffleEntries: response?.autoApprovedRaffleEntries || []
+    };
   },
 
   adminRedeemReward: async (cpf: string, rewardId: string): Promise<string> => {
@@ -498,6 +508,26 @@ export const FidelimaxApiService = {
 
   redeemBulkActivation: async (data: { productId: string, userCpf: string, quantity: number }): Promise<void> => {
     await api.post(`/api/activations/redeem-bulk`, data);
+  },
+
+  getRaffleParticipants: async (productId: string): Promise<any> => {
+    const response = await api.get(`/api/admin/activation-products/${productId}/participants`);
+    return response.data;
+  },
+
+  validateRaffleParticipant: async (id: string, data: { validationStatus: 'pending' | 'approved' | 'rejected'; purchaseAmount?: number | string }): Promise<any> => {
+    const response = await api.patch(`/api/admin/raffle-participants/${id}`, data);
+    return response.data;
+  },
+
+  drawRaffleWinner: async (productId: string, data?: { winnerCount?: number; redraw?: boolean }): Promise<any> => {
+    const response = await api.post(`/api/admin/activation-products/${productId}/draw`, data || {});
+    return response.data;
+  },
+
+  confirmRaffleWinners: async (productId: string): Promise<any> => {
+    const response = await api.post(`/api/admin/activation-products/${productId}/draw/confirm`);
+    return response.data;
   },
 
   // --- Pamphlet / Marketing Carousel ---

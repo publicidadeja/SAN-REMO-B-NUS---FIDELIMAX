@@ -3,6 +3,11 @@ import { useAppStore } from '../store/useAppStore';
 import { motion, AnimatePresence } from 'motion/react';
 import { Story } from '../models/types';
 
+const HORIZONTAL_SWIPE_THRESHOLD = 70;
+const VERTICAL_CLOSE_THRESHOLD = 90;
+const SWIPE_VELOCITY_THRESHOLD = 500;
+const AXIS_DOMINANCE_RATIO = 1.15;
+
 export function Stories() {
   const { stories } = useAppStore();
   const [activeStory, setActiveStory] = useState<Story | null>(null);
@@ -33,15 +38,55 @@ export function Stories() {
 
   if (!stories || !Array.isArray(stories) || stories.length === 0) return null;
 
+  const closeViewer = () => {
+    setActiveStory(null);
+    setIsPaused(false);
+  };
+
   const handleNext = () => {
     const index = stories.findIndex(s => s.id === activeStory?.id);
     if (index < stories.length - 1) {
       setActiveStory(stories[index + 1]);
       setIsPaused(false);
     } else {
-      setActiveStory(null);
+      closeViewer();
+    }
+  };
+
+  const handlePrevious = () => {
+    const index = stories.findIndex((story) => story.id === activeStory?.id);
+    if (index > 0) {
+      setActiveStory(stories[index - 1]);
       setIsPaused(false);
     }
+  };
+
+  const handleSwipeEnd = (offsetX: number, offsetY: number, velocityX: number, velocityY: number) => {
+    const absX = Math.abs(offsetX);
+    const absY = Math.abs(offsetY);
+    const horizontalIntent =
+      absX > absY * AXIS_DOMINANCE_RATIO &&
+      (absX > HORIZONTAL_SWIPE_THRESHOLD || Math.abs(velocityX) > SWIPE_VELOCITY_THRESHOLD);
+    const verticalIntent =
+      offsetY > 0 &&
+      absY > absX * AXIS_DOMINANCE_RATIO &&
+      (absY > VERTICAL_CLOSE_THRESHOLD || Math.abs(velocityY) > SWIPE_VELOCITY_THRESHOLD);
+
+    if (verticalIntent) {
+      closeViewer();
+      return;
+    }
+
+    if (horizontalIntent) {
+      if (offsetX < 0) {
+        handleNext();
+      } else {
+        handlePrevious();
+      }
+      return;
+    }
+
+    setIsPaused(false);
   };
 
   return (
@@ -110,7 +155,10 @@ export function Stories() {
             onTouchEnd={() => setIsPaused(false)}
           >
             {/* Progress Bar */}
-            <div className="absolute top-0 left-0 w-full p-4 flex gap-1 z-[110]">
+            <div
+              className="absolute top-0 left-0 w-full px-4 pb-4 flex gap-1 z-[110]"
+              style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 12px)' }}
+            >
               <div className="h-1 flex-1 bg-white/30 rounded-full overflow-hidden">
                 <motion.div 
                   key={activeStory.id}
@@ -129,7 +177,10 @@ export function Stories() {
             </div>
 
             {/* Header */}
-            <div className="absolute top-6 left-0 w-full px-4 flex justify-between items-center z-[110]">
+            <div
+              className="absolute top-0 left-0 w-full px-4 flex justify-between items-center z-[110]"
+              style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 24px)' }}
+            >
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-full overflow-hidden border border-white/20">
                   {activeStory.type === 'video' ? (
@@ -143,11 +194,13 @@ export function Stories() {
               <button 
                 onClick={(e) => {
                   e.stopPropagation();
-                  setActiveStory(null);
+                  closeViewer();
                 }}
-                className="w-8 h-8 flex items-center justify-center rounded-full bg-black/20 backdrop-blur-md text-white touch-none"
+                aria-label="Fechar stories"
+                className="w-12 h-12 flex items-center justify-center rounded-full bg-black/45 backdrop-blur-md text-white touch-none shadow-lg"
+                data-story-action="ignore"
               >
-                <span className="material-symbols-outlined">close</span>
+                <span className="material-symbols-outlined text-[28px] leading-none">close</span>
               </button>
             </div>
 
@@ -163,7 +216,19 @@ export function Stories() {
               </div>
 
               {/* Main Content */}
-              <div className="relative z-10 w-full h-full flex items-center justify-center">
+              <motion.div
+                className="relative z-10 w-full h-full flex items-center justify-center touch-none"
+                drag
+                dragConstraints={{ top: 0, right: 0, bottom: 0, left: 0 }}
+                dragElastic={0.18}
+                dragMomentum={false}
+                whileDrag={{ scale: 0.985 }}
+                style={{ touchAction: 'none' }}
+                onDragStart={() => setIsPaused(true)}
+                onDragEnd={(_, info) => {
+                  handleSwipeEnd(info.offset.x, info.offset.y, info.velocity.x, info.velocity.y);
+                }}
+              >
                 {activeStory.type === 'video' ? (
                   <video 
                     ref={videoRef}
@@ -194,25 +259,26 @@ export function Stories() {
                     referrerPolicy="no-referrer"
                   />
                 )}
-              </div>
+              </motion.div>
               <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-black/60 pointer-events-none z-20" />
-              
+               
               {/* Product Link Button */}
               {activeStory.productId && (
                 <motion.div 
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                   className="absolute bottom-10 left-1/2 -translate-x-1/2 z-30 w-[80%] max-w-[280px]"
-                >
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      window.location.href = `/rewards?tab=activations`;
-                    }}
-                    className="w-full bg-white text-black font-black py-4 rounded-2xl shadow-2xl flex items-center justify-center gap-2 active:scale-95 transition-transform"
                   >
-                    <span className="material-symbols-outlined">shopping_cart</span>
-                    VER PRODUTO
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        window.location.href = `/rewards?tab=activations`;
+                      }}
+                      data-story-action="ignore"
+                      className="w-full bg-white text-black font-black py-4 rounded-2xl shadow-2xl flex items-center justify-center gap-2 active:scale-95 transition-transform"
+                    >
+                      <span className="material-symbols-outlined">shopping_cart</span>
+                      VER PRODUTO
                   </button>
                 </motion.div>
               )}

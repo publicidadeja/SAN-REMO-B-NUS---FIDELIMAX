@@ -74,7 +74,12 @@ function getApnsAuthKey(): string | null {
   if (keyPath) {
     const resolvedPath = path.isAbsolute(keyPath) ? keyPath : path.resolve(process.cwd(), keyPath);
     if (fs.existsSync(resolvedPath)) {
-      return fs.readFileSync(resolvedPath, 'utf8');
+      try {
+        return fs.readFileSync(resolvedPath, 'utf8');
+      } catch (error: any) {
+        console.warn(`[Push][APNs] Could not read APNS_AUTH_KEY_PATH (${resolvedPath}): ${error.message}`);
+        return null;
+      }
     }
   }
 
@@ -470,6 +475,101 @@ async function sendPushNotification(title: string, body: string, userCpf?: strin
   }
 }
 
+type AdminPermission =
+  | 'dashboard'
+  | 'stories'
+  | 'activations'
+  | 'redeem_activations'
+  | 'points'
+  | 'rewards'
+  | 'team'
+  | 'settings'
+  | 'notifications'
+  | 'pamphlets';
+
+const VALID_ADMIN_PERMISSIONS = new Set<AdminPermission>([
+  'dashboard',
+  'stories',
+  'activations',
+  'redeem_activations',
+  'points',
+  'rewards',
+  'team',
+  'settings',
+  'notifications',
+  'pamphlets',
+]);
+
+function parsePermissionList(value: any): AdminPermission[] {
+  return String(value || '')
+    .split(',')
+    .map((permission) => permission.trim())
+    .filter((permission): permission is AdminPermission => VALID_ADMIN_PERMISSIONS.has(permission as AdminPermission));
+}
+
+function normalizePermissionsInput(value: any): string {
+  const rawPermissions = Array.isArray(value) ? value : String(value || '').split(',');
+  const permissions = rawPermissions
+    .map((permission: any) => String(permission).trim())
+    .filter((permission: string): permission is AdminPermission => VALID_ADMIN_PERMISSIONS.has(permission as AdminPermission));
+
+  return Array.from(new Set(permissions)).join(',');
+}
+
+function userHasAdminPermission(user: any, permissions: AdminPermission | AdminPermission[]) {
+  const requiredPermissions = Array.isArray(permissions) ? permissions : [permissions];
+  if (user?.role === 'admin') return true;
+  if (user?.role !== 'collaborator') return false;
+
+  const userPermissions = parsePermissionList(user.permissions);
+  return requiredPermissions.some((permission) => userPermissions.includes(permission));
+}
+
+function authorizePermission(...permissions: AdminPermission[]) {
+  return (req: any, res: any, next: any) => {
+    if (!userHasAdminPermission(req.user, permissions)) {
+      return res.status(403).json({ error: 'Permissão insuficiente.' });
+    }
+    next();
+  };
+}
+
+function authorizeSettingRead(req: any, res: any, next: any) {
+  if (req.params.key === 'story_expiration_hours') {
+    return authorizePermission('settings', 'stories')(req, res, next);
+  }
+
+  return authorizePermission('settings')(req, res, next);
+}
+
+function getFidelimaxProxyPermissions(targetPath: string): AdminPermission[] | null {
+  const target = normalizeSearchText(targetPath);
+
+  if (target.includes('integracao/pontuaconsumidor')) return ['points'];
+  if (target.includes('integracao/resgatapremio')) return ['rewards'];
+  if (target.includes('integracao/listaprodutos')) return ['rewards'];
+  if (target.includes('integracao/listarconsumidores')) return ['dashboard'];
+  if (target.includes('integracao/consultaconsumidor')) return ['points', 'rewards', 'redeem_activations'];
+  if (target.includes('integracao/retornadadoscliente')) return ['points', 'rewards', 'redeem_activations', 'dashboard'];
+  if (target.includes('integracao/extratoconsumidor')) return ['points', 'rewards', 'redeem_activations', 'dashboard'];
+
+  return null;
+}
+
+function authorizeFidelimaxProxy(req: any, res: any, targetPath: string) {
+  if (req.user?.role === 'user' || req.user?.role === 'admin') {
+    return true;
+  }
+
+  const requiredPermissions = getFidelimaxProxyPermissions(targetPath);
+  if (req.user?.role === 'collaborator' && requiredPermissions && userHasAdminPermission(req.user, requiredPermissions)) {
+    return true;
+  }
+
+  res.status(403).json({ error: 'Permissão insuficiente para esta operação.' });
+  return false;
+}
+
 // Authentication Middleware
 async function authenticate(req: any, res: any, next: any) {
   const authHeader = req.headers.authorization;
@@ -480,20 +580,30 @@ async function authenticate(req: any, res: any, next: any) {
   const token = authHeader.split(' ')[1];
   try {
     const decoded: any = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+    if (decoded?.role === 'admin' || decoded?.role === 'collaborator') {
+      const userId = parseInt(String(decoded.id), 10);
+      if (!Number.isFinite(userId)) {
+        return res.status(401).json({ error: 'Sessão expirada ou token inválido.' });
+      }
+
+      const dbUser = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, email: true, role: true, permissions: true }
+      });
+
+      if (!dbUser) {
+        return res.status(401).json({ error: 'Usuário administrativo não encontrado.' });
+      }
+
+      req.user = { ...decoded, ...dbUser };
+    } else {
+      req.user = decoded;
+    }
     next();
   } catch (error) {
     console.error('[Auth] Invalid token:', error);
     return res.status(401).json({ error: 'Sessão expirada ou token inválido.' });
   }
-}
-
-// Admin Authorization Middleware (Checks role)
-function authorizeAdmin(req: any, res: any, next: any) {
-  if (req.user?.role !== 'admin' && req.user?.role !== 'collaborator') {
-    return res.status(403).json({ error: 'Permissão insuficiente.' });
-  }
-  next();
 }
 
 function parseBoolean(value: any) {
@@ -623,7 +733,7 @@ async function approvePendingRaffleEntriesForPurchase(userCpf: any, purchaseAmou
 
     await sendPushNotification(
       'Cupom de Sorteio Confirmado!',
-      `Seu cupom ${updated.couponNumber} foi confirmado automaticamente pela pontuação Fidelimax.`,
+      `Seu cupom ${updated.couponNumber} foi confirmado automaticamente pela pontuação do app.`,
       cleanCpf,
       {
         type: 'raffle_entry_auto_approved',
@@ -889,7 +999,7 @@ async function startServer() {
   });
 
   // POST Create Admin Notification (Global or Specific)
-  app.post('/api/admin/notifications', authenticate, authorizeAdmin, upload.single('image'), async (req, res) => {
+  app.post('/api/admin/notifications', authenticate, authorizePermission('notifications'), upload.single('image'), async (req, res) => {
     const { title, message, userCpf, broadcastType } = req.body;
     
     if (!title || !message) {
@@ -937,7 +1047,7 @@ async function startServer() {
   });
 
   // GET All Notifications (Admin Management)
-  app.get('/api/admin/notifications', authenticate, authorizeAdmin, async (req, res) => {
+  app.get('/api/admin/notifications', authenticate, authorizePermission('notifications'), async (req, res) => {
     try {
       const notifications = await prisma.notification.findMany({
         where: {
@@ -953,7 +1063,7 @@ async function startServer() {
   });
 
   // DELETE Notification (Admin)
-  app.delete('/api/admin/notifications/:id', authenticate, authorizeAdmin, async (req, res) => {
+  app.delete('/api/admin/notifications/:id', authenticate, authorizePermission('notifications'), async (req, res) => {
     const { id } = req.params;
     try {
       const notification = await prisma.notification.findUnique({ where: { id } });
@@ -988,8 +1098,8 @@ async function startServer() {
     }
   });
 
-  // GET Collaborators (Admin only)
-  app.get('/api/admin/collaborators', authenticate, authorizeAdmin, async (req, res) => {
+  // GET Collaborators (Equipe permission)
+  app.get('/api/admin/collaborators', authenticate, authorizePermission('team'), async (req, res) => {
     try {
       const users = await prisma.user.findMany({
         select: { id: true, name: true, email: true, role: true, permissions: true, createdAt: true }
@@ -1001,17 +1111,20 @@ async function startServer() {
   });
 
   // POST Create Collaborator
-  app.post('/api/admin/collaborators', authenticate, authorizeAdmin, async (req, res) => {
+  app.post('/api/admin/collaborators', authenticate, authorizePermission('team'), async (req: any, res) => {
     const { name, email, password, role, permissions } = req.body;
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'Dados incompletos' });
     }
     
     try {
+      const normalizedRole = req.user?.role === 'admin' && role === 'admin' ? 'admin' : 'collaborator';
+      const normalizedPermissions = normalizePermissionsInput(permissions);
+
       await prisma.user.upsert({
         where: { email },
-        update: { name, password, role: role || 'collaborator', permissions },
-        create: { name, email, password, role: role || 'collaborator', permissions }
+        update: { name, password, role: normalizedRole, permissions: normalizedPermissions },
+        create: { name, email, password, role: normalizedRole, permissions: normalizedPermissions }
       });
       res.json({ success: true });
     } catch (error) {
@@ -1020,16 +1133,23 @@ async function startServer() {
   });
 
   // PUT Update Collaborator
-  app.put('/api/admin/collaborators/:id', authenticate, authorizeAdmin, async (req, res) => {
+  app.put('/api/admin/collaborators/:id', authenticate, authorizePermission('team'), async (req: any, res) => {
     const { id } = req.params;
     const { name, email, password, role, permissions } = req.body;
     
     try {
       // Security: Previne alteração do admin mestre via API se não for por ele mesmo ou se for uma tentativa de mudar o e-mail/role do mestre
       const targetUser = await prisma.user.findUnique({ where: { id: parseInt(id) } });
+      if (!targetUser) return res.status(404).json({ error: 'Colaborador não encontrado.' });
+      if (targetUser.role === 'admin' && req.user?.role !== 'admin') {
+        return res.status(403).json({ error: 'Apenas administradores podem alterar outro administrador.' });
+      }
       if (targetUser?.email === 'admin@sanremobonus.com.br' && (email !== targetUser.email || role !== 'admin')) {
         return res.status(403).json({ error: 'O administrador mestre não pode ter seu e-mail ou cargo alterado.' });
       }
+
+      const normalizedRole = req.user?.role === 'admin' && role === 'admin' ? 'admin' : 'collaborator';
+      const normalizedPermissions = normalizePermissionsInput(permissions);
 
       await prisma.user.update({
         where: { id: parseInt(id) },
@@ -1037,8 +1157,8 @@ async function startServer() {
           name, 
           email, 
           password: password || undefined, 
-          role, 
-          permissions 
+          role: normalizedRole, 
+          permissions: normalizedPermissions 
         }
       });
       res.json({ success: true });
@@ -1048,12 +1168,15 @@ async function startServer() {
   });
 
   // DELETE Collaborator
-  app.delete('/api/admin/collaborators/:id', authenticate, authorizeAdmin, async (req, res) => {
+  app.delete('/api/admin/collaborators/:id', authenticate, authorizePermission('team'), async (req: any, res) => {
     const { id } = req.params;
     try {
       const targetUser = await prisma.user.findUnique({ where: { id: parseInt(id) } });
       if (targetUser?.email === 'admin@sanremobonus.com.br') {
         return res.status(403).json({ error: 'O administrador mestre não pode ser excluído.' });
+      }
+      if (targetUser?.role === 'admin' && req.user?.role !== 'admin') {
+        return res.status(403).json({ error: 'Apenas administradores podem excluir outro administrador.' });
       }
 
       await prisma.user.delete({ where: { id: parseInt(id) } });
@@ -1064,7 +1187,7 @@ async function startServer() {
   });
 
   // GET Settings
-  app.get('/api/admin/settings/:key', authenticate, authorizeAdmin, async (req, res) => {
+  app.get('/api/admin/settings/:key', authenticate, authorizeSettingRead, async (req, res) => {
     try {
       const setting = await prisma.setting.findUnique({ where: { key: req.params.key } });
       res.json(setting || { key: req.params.key, value: '' });
@@ -1074,7 +1197,7 @@ async function startServer() {
   });
 
   // POST Update Settings
-  app.post('/api/admin/settings', authenticate, authorizeAdmin, async (req, res) => {
+  app.post('/api/admin/settings', authenticate, authorizePermission('settings'), async (req, res) => {
     const { key, value } = req.body;
     try {
       await prisma.setting.upsert({
@@ -1104,7 +1227,7 @@ async function startServer() {
   });
 
   // POST Upload Pamphlet Image (Append to carousel)
-  app.post('/api/admin/pamphlet-upload', authenticate, authorizeAdmin, upload.single('file'), async (req, res) => {
+  app.post('/api/admin/pamphlet-upload', authenticate, authorizePermission('pamphlets'), upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Arquivo é obrigatório' });
     
     try {
@@ -1129,7 +1252,7 @@ async function startServer() {
   });
 
   // DELETE Pamphlet Image
-  app.delete('/api/admin/pamphlet/:id', authenticate, authorizeAdmin, async (req, res) => {
+  app.delete('/api/admin/pamphlet/:id', authenticate, authorizePermission('pamphlets'), async (req, res) => {
     const id = parseInt(req.params.id);
     try {
       // @ts-ignore
@@ -1151,8 +1274,8 @@ async function startServer() {
     }
   });
 
-  // GET System Wide Stats (Admin only)
-  app.get('/api/admin/system-stats', authenticate, authorizeAdmin, async (req, res) => {
+  // GET System Wide Stats (Dashboard permission)
+  app.get('/api/admin/system-stats', authenticate, authorizePermission('dashboard'), async (req, res) => {
     try {
       const now = new Date();
       const last24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
@@ -1190,6 +1313,10 @@ async function startServer() {
   app.all('/api/fidelimax-proxy/*', authenticate, async (req: any, res: any) => {
     const targetPath = req.params[0] || req.path.replace('/api/fidelimax-proxy/', '');
     const url = `https://api.fidelimax.com.br/api/${targetPath}`;
+
+    if (!authorizeFidelimaxProxy(req, res, targetPath)) {
+      return;
+    }
     
     let authToken = req.headers['authtoken'] || req.headers['AuthToken'] || '';
     
@@ -1268,7 +1395,7 @@ async function startServer() {
   });
 
   // POST Create Story (Multimedia)
-  app.post('/api/stories', authenticate, authorizeAdmin, upload.single('file'), async (req: any, res: any) => {
+  app.post('/api/stories', authenticate, authorizePermission('stories'), upload.single('file'), async (req: any, res: any) => {
     const { title, userId, productId } = req.body;
     if (!req.file) return res.status(400).json({ error: 'Arquivo é obrigatório' });
 
@@ -1312,7 +1439,7 @@ async function startServer() {
   });
 
   // DELETE Story
-  app.delete('/api/stories/:id', authenticate, authorizeAdmin, async (req, res) => {
+  app.delete('/api/stories/:id', authenticate, authorizePermission('stories'), async (req, res) => {
     const { id } = req.params;
     try {
       const storyToDelete = await prisma.story.findUnique({ where: { id } });
@@ -1411,7 +1538,7 @@ async function startServer() {
   });
 
   // POST Create Activation Product (Admin/Collab)
-  app.post('/api/admin/activation-products', authenticate, authorizeAdmin, upload.single('file'), async (req: any, res: any) => {
+  app.post('/api/admin/activation-products', authenticate, authorizePermission('activations'), upload.single('file'), async (req: any, res: any) => {
     const {
       name,
       description,
@@ -1519,7 +1646,7 @@ async function startServer() {
   });
 
   // PUT Update Activation Product
-  app.put('/api/admin/activation-products/:id', authenticate, authorizeAdmin, upload.single('file'), async (req, res) => {
+  app.put('/api/admin/activation-products/:id', authenticate, authorizePermission('activations'), upload.single('file'), async (req, res) => {
     const { id } = req.params;
     const {
       name,
@@ -1594,7 +1721,7 @@ async function startServer() {
   });
 
   // DELETE Activation Product
-  app.delete('/api/admin/activation-products/:id', authenticate, authorizeAdmin, async (req, res) => {
+  app.delete('/api/admin/activation-products/:id', authenticate, authorizePermission('activations'), async (req, res) => {
     try {
       const product = await prisma.activationProduct.findUnique({ where: { id: req.params.id } });
       if (product?.imageUrl) {
@@ -1609,7 +1736,7 @@ async function startServer() {
   });
 
   // GET Raffle Participants
-  app.get('/api/admin/activation-products/:id/participants', authenticate, authorizeAdmin, async (req, res) => {
+  app.get('/api/admin/activation-products/:id/participants', authenticate, authorizePermission('activations'), async (req, res) => {
     const { id } = req.params;
     try {
       const product = await prisma.activationProduct.findUnique({
@@ -1648,7 +1775,7 @@ async function startServer() {
   });
 
   // PATCH Raffle Participant validation
-  app.patch('/api/admin/raffle-participants/:id', authenticate, authorizeAdmin, async (req, res) => {
+  app.patch('/api/admin/raffle-participants/:id', authenticate, authorizePermission('activations'), async (req, res) => {
     const { id } = req.params;
     const { validationStatus, purchaseAmount } = req.body;
     const nextStatus = ['pending', 'approved', 'rejected'].includes(validationStatus) ? validationStatus : null;
@@ -1728,7 +1855,7 @@ async function startServer() {
   });
 
   // POST Draw Raffle Winners
-  app.post('/api/admin/activation-products/:id/draw', authenticate, authorizeAdmin, async (req, res) => {
+  app.post('/api/admin/activation-products/:id/draw', authenticate, authorizePermission('activations'), async (req, res) => {
     const { id } = req.params;
     const requestedCount = Math.max(1, Math.min(parseInt(req.body?.winnerCount || req.body?.count || '1'), 50));
     const redraw = parseBoolean(req.body?.redraw);
@@ -1794,7 +1921,7 @@ async function startServer() {
   });
 
   // POST Confirm Raffle Winners
-  app.post('/api/admin/activation-products/:id/draw/confirm', authenticate, authorizeAdmin, async (req, res) => {
+  app.post('/api/admin/activation-products/:id/draw/confirm', authenticate, authorizePermission('activations'), async (req, res) => {
     const { id } = req.params;
 
     try {
@@ -1917,7 +2044,7 @@ async function startServer() {
 
         const title = requiresPurchaseValidation ? 'Participação Recebida!' : 'Participação Confirmada!';
         const message = requiresPurchaseValidation
-          ? `Para confirmar seu cupom no sorteio ${product.name}, pontue uma compra acima de ${formatCurrency(product.minPurchaseValue)} no Fidelimax. A validação será automática.`
+          ? `Para confirmar seu cupom no sorteio ${product.name}, pontue no app uma compra acima de ${formatCurrency(product.minPurchaseValue)}. A validação será automática.`
           : `Você já está participando do sorteio ${product.name}. Cupom: ${participant.couponNumber}.`;
 
         await prisma.notification.create({
@@ -2003,7 +2130,7 @@ async function startServer() {
   });
   
   // POST Redeem Activation (Mark as used)
-  app.post('/api/activations/:id/redeem', authenticate, authorizeAdmin, async (req, res) => {
+  app.post('/api/activations/:id/redeem', authenticate, authorizePermission('redeem_activations'), async (req, res) => {
     const { id } = req.params;
     try {
       const activation = await (prisma.productActivation.update({
@@ -2038,7 +2165,7 @@ async function startServer() {
   });
 
   // POST Bulk Redeem Activation (Mark multiple units as used)
-  app.post('/api/activations/redeem-bulk', authenticate, authorizeAdmin, async (req, res) => {
+  app.post('/api/activations/redeem-bulk', authenticate, authorizePermission('redeem_activations'), async (req, res) => {
     const { productId, userCpf, quantity } = req.body;
     const cleanCpf = userCpf.replace(/\D/g, '');
     const qty = parseInt(quantity) || 1;

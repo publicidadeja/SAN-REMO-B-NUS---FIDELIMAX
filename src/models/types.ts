@@ -66,6 +66,11 @@ export interface ActivationProduct {
   imageUrl?: string;
   originalPrice: number;
   promotionalPrice: number;
+  promotionType?: 'offer' | 'raffle';
+  prizeDescription?: string;
+  minPurchaseValue?: number;
+  participationInstructions?: string;
+  drawDate?: string;
   limitPerCpf: number;
   redeemWindowHours: number;
   expiresAt: string;
@@ -82,5 +87,14 @@ export interface ProductActivation {
   activatedAt: string;
   validUntil: string;
   redeemedAt?: string;
+  validationStatus?: 'pending' | 'approved' | 'rejected';
+  purchaseAmount?: number;
+  customerName?: string;
+  customerEmail?: string;
+  customerPhone?: string;
+  couponNumber?: string;
+  validatedAt?: string;
+  isWinner?: boolean;
+  drawnAt?: string;
   product?: ActivationProduct;
 }
