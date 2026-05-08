@@ -336,7 +336,7 @@ async function sendFcmNotification(record: StoredPushToken, title: string, body:
       },
       payload: {
         aps: {
-          sound: 'notification.mp3',
+          sound: 'notification.wav',
           badge: 1,
         },
       },
@@ -387,7 +387,7 @@ async function sendApnsNotification(record: StoredPushToken, title: string, body
   const payload = {
     aps: {
       alert: { title, body },
-      sound: 'notification.mp3',
+      sound: 'notification.wav',
       badge: 1,
     },
     ...data,
