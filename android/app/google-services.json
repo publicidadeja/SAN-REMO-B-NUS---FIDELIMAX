@@ -1,32 +1,13 @@
 {
   "project_info": {
-    "project_number": "14766353520",
-    "project_id": "sanremobonus",
-    "storage_bucket": "sanremobonus.firebasestorage.app"
+    "project_number": "85031478255",
+    "project_id": "san-remo-bonus",
+    "storage_bucket": "san-remo-bonus.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:14766353520:android:f99621ca9d08481d3e98b5",
-        "android_client_info": {
-          "package_name": "br.com.sanremobonus.app"
-        }
-      },
-      "oauth_client": [],
-      "api_key": [
-        {
-          "current_key": "AIzaSyA6ffyF0wk4Uf1-Gy9boT-ErJhX_6mQGTc"
-        }
-      ],
-      "services": {
-        "appinvite_service": {
-          "other_platform_oauth_client": []
-        }
-      }
-    },
-    {
-      "client_info": {
-        "mobilesdk_app_id": "1:14766353520:android:a393679044239dd63e98b5",
+        "mobilesdk_app_id": "1:85031478255:android:3ead6ab3958dee4409cc1a",
         "android_client_info": {
           "package_name": "sanremobonus.com"
         }
@@ -34,7 +15,7 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyA6ffyF0wk4Uf1-Gy9boT-ErJhX_6mQGTc"
+          "current_key": "AIzaSyASTOh_5FQIVurO4IBElzM32NuyOHxYO6w"
         }
       ],
       "services": {

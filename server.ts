@@ -263,25 +263,40 @@ const upload = multer({
   }
 });
 
-// Initialize Firebase Admin (Only if credentials are provided)
-// In a real scenario, you would provide the service account credentials via env variables
-try {
-  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-    console.log('Firebase Admin initialized successfully');
-  } else {
-    console.warn('FIREBASE_SERVICE_ACCOUNT not found. Push notifications will be mocked.');
+const firebaseMessagingApps: Array<{ label: string; app: any }> = [];
+
+function initializeFirebaseAdminFromEnv(envName: string, appName?: string) {
+  const rawCredentials = getEnvValue(envName);
+
+  if (!rawCredentials) {
+    return;
   }
-} catch (error) {
-  console.error('Failed to initialize Firebase Admin:', error);
+
+  try {
+    const serviceAccount = JSON.parse(rawCredentials);
+    const app = admin.initializeApp(
+      { credential: admin.credential.cert(serviceAccount) },
+      appName
+    );
+    const label = serviceAccount.project_id || envName;
+    firebaseMessagingApps.push({ label, app });
+    console.log(`Firebase Admin initialized successfully (${label})`);
+  } catch (error) {
+    console.error(`Failed to initialize Firebase Admin from ${envName}:`, error);
+  }
+}
+
+initializeFirebaseAdminFromEnv('FIREBASE_SERVICE_ACCOUNT');
+initializeFirebaseAdminFromEnv('FIREBASE_SERVICE_ACCOUNT_LEGACY', 'legacy');
+
+if (firebaseMessagingApps.length === 0) {
+  console.warn('FIREBASE_SERVICE_ACCOUNT not found. Push notifications will be mocked.');
 }
 
 function logPushProviderStatus() {
-  if (admin.apps.length > 0) {
-    console.log('[Push][FCM] Android push enabled via Firebase Admin.');
+  if (firebaseMessagingApps.length > 0) {
+    const labels = firebaseMessagingApps.map(({ label }) => label).join(', ');
+    console.log(`[Push][FCM] Push enabled via Firebase Admin app(s): ${labels}.`);
   }
 
   const missingApnsFields = getApnsMissingConfigFields();
@@ -299,7 +314,7 @@ function logPushProviderStatus() {
 logPushProviderStatus();
 
 async function sendFcmNotification(record: StoredPushToken, title: string, body: string, data: Record<string, string>): Promise<PushSendResult> {
-  if (admin.apps.length === 0) {
+  if (firebaseMessagingApps.length === 0) {
     console.log(`[Push MOCK][FCM] Title: ${title} | Body: ${body} | Target: ${describePushTarget(record)}`);
     return { success: false, mocked: true, reason: 'missing_firebase_admin' };
   }
@@ -328,18 +343,33 @@ async function sendFcmNotification(record: StoredPushToken, title: string, body:
     },
   };
 
-  try {
-    await admin.messaging().send(message);
-    return { success: true };
-  } catch (error: any) {
-    console.error(`[Push][FCM] Error sending to ${describePushTarget(record)}:`, error.message);
+  const failures: Array<{ code?: string; message: string; label: string }> = [];
 
-    if (error.code === 'messaging/registration-token-not-registered' || error.code === 'messaging/invalid-registration-token') {
-      await cleanupInvalidPushToken(record.token);
+  for (const { label, app } of firebaseMessagingApps) {
+    try {
+      await admin.messaging(app).send(message);
+      return { success: true };
+    } catch (error: any) {
+      failures.push({
+        code: error.code,
+        message: error.message,
+        label,
+      });
+      console.error(`[Push][FCM:${label}] Error sending to ${describePushTarget(record)}:`, error.message);
     }
-
-    return { success: false, error: error.message };
   }
+
+  const shouldCleanup = failures.some(({ code }) => code === 'messaging/invalid-registration-token')
+    || failures.every(({ code }) => code === 'messaging/registration-token-not-registered');
+
+  if (shouldCleanup) {
+    await cleanupInvalidPushToken(record.token);
+  }
+
+  return {
+    success: false,
+    error: failures.map(({ label, code, message }) => `${label}: ${code || 'unknown'} ${message}`).join(' | '),
+  };
 }
 
 async function sendApnsNotification(record: StoredPushToken, title: string, body: string, data: Record<string, any>): Promise<PushSendResult> {
