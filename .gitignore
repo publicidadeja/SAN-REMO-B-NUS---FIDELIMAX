@@ -14,3 +14,4 @@ coverage/
 
 # Security
 android/key
+*firebase-adminsdk*.json

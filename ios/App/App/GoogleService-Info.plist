@@ -9,7 +9,7 @@
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
-	<string>br.com.sanremobonus.app</string>
+	<string>sanremobonus</string>
 	<key>PROJECT_ID</key>
 	<string>sanremobonus</string>
 	<key>STORAGE_BUCKET</key>
@@ -25,6 +25,6 @@
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:14766353520:ios:c161882883711d013e98b5</string>
+	<string>1:14766353520:ios:9b8587e71d3397ba3e98b5</string>
 </dict>
 </plist>
