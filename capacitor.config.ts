@@ -3,7 +3,7 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'br.com.sanremobonus.app',
+  appId: 'sanremobonus',
   appName: 'San Remo Bonus',
   webDir: 'dist',
   includePlugins: [

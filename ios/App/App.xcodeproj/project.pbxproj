@@ -316,7 +316,7 @@
 				);
 				MARKETING_VERSION = 4.3;
 				OTHER_SWIFT_FLAGS = "$(inherited) \"-D\" \"COCOAPODS\" \"-DDEBUG\"";
-				PRODUCT_BUNDLE_IDENTIFIER = br.com.sanremobonus.app;
+				PRODUCT_BUNDLE_IDENTIFIER = sanremobonus;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_VERSION = 5.0;
@@ -341,9 +341,9 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 4.3;
-				PRODUCT_BUNDLE_IDENTIFIER = br.com.sanremobonus.app;
+				PRODUCT_BUNDLE_IDENTIFIER = sanremobonus;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				PROVISIONING_PROFILE_SPECIFIER = sanremobonus_app_store;
+				PROVISIONING_PROFILE_SPECIFIER = sanremobonus_store;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
